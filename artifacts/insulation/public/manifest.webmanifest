@@ -1,0 +1,10 @@
+{
+  "name": "Insulation Takeoff",
+  "short_name": "Takeoff",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f5f9",
+  "theme_color": "#20243a",
+  "description": "Voice-first insulation takeoff application"
+}

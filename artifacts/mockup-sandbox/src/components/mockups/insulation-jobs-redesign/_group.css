@@ -1,0 +1,16 @@
+.jobs-current,
+.jobs-current * {
+  box-sizing: border-box;
+}
+
+.jobs-current {
+  min-height: 100dvh;
+  color: #102b4c;
+  background: #f8fafc;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.jobs-current button {
+  font: inherit;
+  cursor: pointer;
+}

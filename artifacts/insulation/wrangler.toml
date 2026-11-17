@@ -1,0 +1,20 @@
+name = "insulation-takeoff"
+main = "worker/index.js"
+compatibility_date = "2026-11-13"
+workers_dev = true
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "insulation-takeoff"
+database_id = "f2cad654-4e5e-4c73-b37f-c00255abe614"
+migrations_dir = "worker/migrations"
+
+[vars]
+APP_NAME = "Insulation Takeoff"
+SESSION_DAYS = "14"

@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "insulation"
+description = "Voice-first insulation takeoff application. The Replit preview uses the included Cloudflare Worker with a local-only D1 database; remote Cloudflare setup remains separate."
+version = "1.0.0"
+id = "artifacts/insulation"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19324
+
+[services.development]
+run = "pnpm --filter @workspace/insulation run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/insulation", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/insulation/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "19324"
+BASE_PATH = "/"

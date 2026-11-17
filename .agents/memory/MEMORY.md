@@ -1,0 +1,4 @@
+- [Cloudflare deployment target](cloudflare-deployment-target.md) — verify the intended account by matching the configured D1 ID; do not assume the current connection is correct.
+- [Insulation Takeoff branding](insulation-takeoff-branding.md) — use the user-provided Fulcher logo and navy/red/white palette throughout this app.
+- [Native build readiness](native-build-readiness.md) — keep speech SDK versions pinned until Xcode/device verification; Linux sync is not a Swift build.
+- [Voice takeoff workflow](voice-takeoff-workflow.md) — native microphone CTA is primary; manual entry is separate; stop and review before processing.

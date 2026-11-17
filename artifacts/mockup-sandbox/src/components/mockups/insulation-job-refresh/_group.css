@@ -1,0 +1,197 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #20243a;
+  background: #f4f5f9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: #f4f5f9;
+}
+
+.insulation-current {
+  color: #20243a;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+}
+
+.insulation-current button,
+.insulation-current input,
+.insulation-current textarea,
+.insulation-current select {
+  font: inherit;
+}
+
+.insulation-current button {
+  min-height: 44px;
+  padding: 12px 15px;
+  border: 1px solid #d6d9e4;
+  border-radius: 12px;
+  background: white;
+  color: #20243a;
+  font-weight: 650;
+}
+
+.insulation-current .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  background: #20243a;
+  color: white;
+}
+
+.insulation-current main {
+  max-width: 900px;
+  margin: auto;
+  padding: 22px 16px 70px;
+}
+
+.insulation-current h1 {
+  margin: 10px 0 5px;
+  font-size: 28px;
+}
+
+.insulation-current h2 {
+  margin: 4px 0 10px;
+  font-size: 19px;
+}
+
+.insulation-current p {
+  line-height: 1.5;
+}
+
+.insulation-current .card {
+  margin: 14px 0;
+  padding: 17px;
+  border: 1px solid #e2e4ec;
+  border-radius: 16px;
+  background: white;
+  box-shadow: 0 2px 10px #20243a08;
+}
+
+.insulation-current .page-heading,
+.insulation-current .entry-head,
+.insulation-current .entry-actions,
+.insulation-current .action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.insulation-current .page-heading {
+  margin: 10px 0 18px;
+}
+
+.insulation-current .page-heading p,
+.insulation-current .hint,
+.insulation-current .entry small {
+  color: #656b80;
+}
+
+.insulation-current .controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.insulation-current .primary {
+  border-color: #343b69;
+  background: #343b69;
+  color: white;
+}
+
+.insulation-current .danger {
+  border-color: #a52e38;
+  background: #a52e38;
+  color: white;
+}
+
+.insulation-current .record-state {
+  margin: 12px 0;
+  padding: 15px;
+  border-radius: 10px;
+  background: #f0f1f6;
+  font-weight: 700;
+}
+
+.insulation-current .voice-transcript {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid #e2e4ec;
+  border-radius: 12px;
+  overflow-wrap: anywhere;
+}
+
+.insulation-current .status,
+.insulation-current .pill {
+  display: inline-block;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #eef0f7;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.insulation-current .pill.good {
+  background: #e4f5e9;
+  color: #176b35;
+}
+
+.insulation-current .pill.review {
+  background: #fff2d9;
+  color: #805300;
+}
+
+.insulation-current .entry {
+  padding: 14px 0;
+  border-top: 1px solid #eceef3;
+}
+
+.insulation-current .entry .quantity {
+  font-size: 20px;
+  font-weight: 750;
+}
+
+.insulation-current .entry-actions button,
+.insulation-current .action-row button {
+  min-height: 38px;
+  padding: 8px 11px;
+  font-size: 13px;
+}
+
+.insulation-current label {
+  display: block;
+  margin: 14px 0;
+  font-weight: 650;
+}
+
+.insulation-current input,
+.insulation-current textarea,
+.insulation-current select {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 12px;
+  border: 1px solid #d6d9e4;
+  border-radius: 10px;
+  background: white;
+  color: #20243a;
+}
+
+@media (min-width: 650px) {
+  .insulation-current .controls {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
