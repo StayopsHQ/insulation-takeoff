@@ -205,3 +205,13 @@ test("construction section names remain detectable", () => {
     assert.equal(detectSection(phrase), section);
   }
 });
+
+test("basement wall calculation uses its own bays and height, not earlier exterior wall details", () => {
+  const transcript = "Start a new job. Exterior walls, 24 bays, 2x4, 16 inches on center, 9-foot walls. Basement exterior walls, 12 bays, 2x4, 16 inches on center, 8-foot walls. Attic, 30 by 40, with sprinklers. Actually, correction on the exterior walls. I said 24 bays, but make that 28 bays. Keep everything else the same.";
+  const result = parseTranscript(transcript);
+  assert.equal(result.section, "basement exterior");
+  assert.equal(result.parsed.bays, 12);
+  assert.equal(result.parsed.height, 8);
+  assert.equal(result.parsed.spacing, 16);
+  assert.equal(result.parsed.squareFeet, 120);
+});
