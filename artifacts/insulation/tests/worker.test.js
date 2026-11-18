@@ -62,8 +62,10 @@ test("first admin setup succeeds and creates a usable login session", async () =
         async first() {
           if (sql.includes("SELECT COUNT(*) AS count FROM users")) return { count: state.users.length };
           if (sql.includes("FROM sessions s JOIN users u")) {
+            const cookieTokenHash=values[0];
             const row=state.sessions[0];
-            return row ? {id:state.users[0].id,email:state.users[0].email,displayName:state.users[0].display_name,role:"admin",expiresAt:row[3]} : null;
+            if (!row || row[2] !== cookieTokenHash || row[3] <= values[1]) return null;
+            return {id:state.users[0].id,email:state.users[0].email,displayName:state.users[0].display_name,role:"admin",expiresAt:row[3]};
           }
           if (sql.includes("FROM users WHERE email = ?")) return state.users.find(u=>u.email===values[0]) || null;
           if (sql.includes("SUM(CASE WHEN ip_key")) return {ip_count:0,email_count:0};
