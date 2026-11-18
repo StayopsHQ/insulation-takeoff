@@ -65,10 +65,25 @@ function fromBase64url(value) {
 async function sha256(value) {
   return base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value))));
 }
-async function passwordHash(password, salt) {
+// Store the PBKDF2 work factor with each new hash so sign-in uses the
+// exact parameters used at account creation. Legacy hashes keep their old factor.
+const PASSWORD_HASH_ITERATIONS = 100000;
+const LEGACY_PASSWORD_HASH_ITERATIONS = 310000;
+
+async function passwordHash(password, salt, iterations = PASSWORD_HASH_ITERATIONS) {
   const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: fromBase64url(salt), iterations: 310000, hash: "SHA-256" }, material, 256);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: fromBase64url(salt), iterations, hash: "SHA-256" }, material, 256);
   return base64url(new Uint8Array(bits));
+}
+
+function storedPasswordHash(hash, iterations = PASSWORD_HASH_ITERATIONS) {
+  return `pbkdf2-sha256:${iterations}:${hash}`;
+}
+
+function parseStoredPasswordHash(value) {
+  const match = /^pbkdf2-sha256:(\d+):([A-Za-z0-9_-]+)$/.exec(value || "");
+  if (match) return { iterations: Number(match[1]), hash: match[2] };
+  return { iterations: LEGACY_PASSWORD_HASH_ITERATIONS, hash: value };
 }
 function secureCookie(request, token, maxAge) {
   const nativeOrigin = request.headers.get("Origin") === NATIVE_APP_ORIGIN;
@@ -142,7 +157,7 @@ async function createUser(env, { email, password, displayName, role = "member" }
   }
   const name = requireString(displayName, "Display name", 100);
   const salt = base64url(crypto.getRandomValues(new Uint8Array(16)));
-  const hash = await passwordHash(password, salt);
+  const hash = storedPasswordHash(await passwordHash(password, salt));
   const id = makeId();
   try {
     await env.DB.prepare("INSERT INTO users (id,email,display_name,password_hash,password_salt,role,created_at) VALUES (?,?,?,?,?,?,?)")
@@ -179,7 +194,7 @@ async function handleApi(request, env, url) {
     }
     const displayName = requireString(body.displayName, "Display name", 100);
     const salt = base64url(crypto.getRandomValues(new Uint8Array(16)));
-    const hash = await passwordHash(body.password, salt);
+    const hash = storedPasswordHash(await passwordHash(body.password, salt));
     const id = makeId();
     // A single conditional INSERT makes first-admin creation atomic under concurrent requests.
     const inserted = await env.DB.prepare(`
@@ -212,8 +227,9 @@ async function handleApi(request, env, url) {
       throw new HttpError(429, "Too many sign-in attempts. Wait 15 minutes and try again.");
     }
     const row = await env.DB.prepare("SELECT id,email,display_name,password_hash,password_salt,role FROM users WHERE email = ?").bind(email).first();
-    const candidate = row ? await passwordHash(body.password, row.password_salt) : "";
-    if (!row || candidate !== row.password_hash) {
+    const stored = row ? parseStoredPasswordHash(row.password_hash) : null;
+    const candidate = row ? await passwordHash(body.password, row.password_salt, stored.iterations) : "";
+    if (!row || candidate !== stored.hash) {
       await env.DB.prepare("INSERT INTO login_attempts (ip_key,email_key,attempted_at) VALUES (?,?,?)")
         .bind(keys.ip, keys.email, nowIso()).run();
       throw new HttpError(401, "Email or password is incorrect.");
