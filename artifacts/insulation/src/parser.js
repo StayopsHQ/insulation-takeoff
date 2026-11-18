@@ -94,6 +94,23 @@ function sumPairAreas(pairs) {
   return pairs.reduce((sum, [length, width]) => sum + length * width, 0);
 }
 
+
+function sectionScopedText(text, section) {
+  const selectedPattern = SECTION_PATTERNS.find(([name]) => name === section)?.[1];
+  if (!selectedPattern) return text;
+  const selectedMatch = selectedPattern.exec(text);
+  if (!selectedMatch) return text;
+  const start = selectedMatch.index;
+  const contentStart = start + selectedMatch[0].length;
+  let end = text.length;
+  for (const [name, pattern] of SECTION_PATTERNS) {
+    if (name === section) continue;
+    const next = pattern.exec(text.slice(contentStart));
+    if (next) end = Math.min(end, contentStart + next.index);
+  }
+  return text.slice(start, end);
+}
+
 function parseWall(text, section, result) {
   const framingMatches = [...text.matchAll(/\b2\s*x\s*(4|6)\b/g)];
   const spacingMatches = [...text.matchAll(/\b(16|24)\s*(?:oc|o\.c\.)\b/g)];
@@ -181,7 +198,7 @@ export function parseTranscript(rawTranscript, currentSection = null, currentMat
   }
 
   if (WALL_SECTIONS.includes(section)) {
-    parseWall(normalizedTranscript, section, result);
+    parseWall(sectionScopedText(normalizedTranscript, section), section, result);
     return result;
   }
 
