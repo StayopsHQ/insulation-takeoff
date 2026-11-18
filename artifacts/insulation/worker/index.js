@@ -1,3 +1,5 @@
+import { passwordHash, verifyPassword } from "./passwords.js";
+
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
 const SESSION_COOKIE = "takeoff_session";
 const NATIVE_APP_ORIGIN = "capacitor://localhost";
@@ -58,17 +60,8 @@ function base64url(bytes) {
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
-function fromBase64url(value) {
-  const base64 = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4);
-  return Uint8Array.from(atob(base64), char => char.charCodeAt(0));
-}
 async function sha256(value) {
   return base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value))));
-}
-async function passwordHash(password, salt) {
-  const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: fromBase64url(salt), iterations: 310000, hash: "SHA-256" }, material, 256);
-  return base64url(new Uint8Array(bits));
 }
 function secureCookie(request, token, maxAge) {
   const nativeOrigin = request.headers.get("Origin") === NATIVE_APP_ORIGIN;
@@ -212,8 +205,8 @@ async function handleApi(request, env, url) {
       throw new HttpError(429, "Too many sign-in attempts. Wait 15 minutes and try again.");
     }
     const row = await env.DB.prepare("SELECT id,email,display_name,password_hash,password_salt,role FROM users WHERE email = ?").bind(email).first();
-    const candidate = row ? await passwordHash(body.password, row.password_salt) : "";
-    if (!row || candidate !== row.password_hash) {
+    const validPassword = row ? await verifyPassword(body.password, row.password_salt, row.password_hash) : false;
+    if (!validPassword) {
       await env.DB.prepare("INSERT INTO login_attempts (ip_key,email_key,attempted_at) VALUES (?,?,?)")
         .bind(keys.ip, keys.email, nowIso()).run();
       throw new HttpError(401, "Email or password is incorrect.");
