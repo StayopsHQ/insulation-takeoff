@@ -54,6 +54,48 @@ export function rectangleArea(dimensions) {
   return dimensions.reduce((area, value) => area * finiteNumber(value, "Dimension"), 1);
 }
 
+export function slopeSquareFeet(length, width, factor = 1) {
+  return finiteNumber(length, "Slope length") * finiteNumber(width, "Slope width") * finiteNumber(factor, "Slope factor");
+}
+
 export function layeredMaterialCoverage(area, layers = 1) {
   return finiteNumber(area, "Area") * finiteNumber(layers, "Layer count");
+}
+
+// Entries use the parser's canonical section names. Derived consumables and
+// attic allocations must never be counted as additional measured area.
+export function isExteriorWallMeasurement(entry) {
+  if (String(entry.section || "").trim().toLowerCase() !== "exterior walls") return false;
+  // Area labels are local to this item, never the complete recording transcript.
+  const area = entry.areaLabel || entry.parsed?.voiceArea || "";
+  return !/\bunfinished\b/i.test(`${area} ${entry.rawTranscript || ""}`);
+}
+
+export function takeoffTotals(entries = []) {
+  let totalMeasuredArea = 0;
+  let exteriorWallSF = 0;
+  let bafflesLF = 0;
+  let sprinklerArea = 0;
+  let blownArea = 0;
+  for (const entry of entries) {
+    if (entry.status !== "calculated" || entry.requiresReview) continue;
+    const parsed = entry.parsed || {};
+    const section = String(entry.section || "").trim().toLowerCase();
+    const area = finiteNumber(parsed.area ?? parsed.squareFeet ?? 0, "Measured area");
+    if (!["caulk", "foam", "baffles"].includes(section)) totalMeasuredArea += area;
+    if (isExteriorWallMeasurement(entry)) exteriorWallSF += area;
+    if (section === "attic") {
+      bafflesLF += (parsed.dimensionPairs || []).reduce((sum, pair) => sum + finiteNumber(pair[0], "Baffle length"), 0);
+      sprinklerArea += finiteNumber(parsed.sprinklerInsulation ?? 0, "Sprinkler allocation");
+      blownArea += finiteNumber(parsed.blownInsulation ?? 0, "Blown allocation");
+    }
+  }
+  const clean = value => Number(value.toFixed(9));
+  exteriorWallSF = clean(exteriorWallSF);
+  const caulkTubes = clean(exteriorWallSF / 50);
+  return {
+    totalMeasuredArea: clean(totalMeasuredArea), bafflesLF: clean(bafflesLF),
+    exteriorWallSF, caulkTubes, foamUnits: clean(caulkTubes * 0.25),
+    sprinklerArea: clean(sprinklerArea), blownArea: clean(blownArea)
+  };
 }

@@ -114,7 +114,11 @@ test("review text combines confirmed speech with the latest interim window only 
 
 test("the branded record controls and four separate tiles exist on both platforms", () => {
   for (const nativeAvailable of [false, true]) {
-    const html = renderVoiceTakeoff({ nativeAvailable });
+    const html = renderVoiceTakeoff({
+      nativeAvailable,
+      browserCaptureSupported: !nativeAvailable,
+      browserTranscriptionAvailable: !nativeAvailable
+    });
     const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
     assert.equal(new Set(ids).size, ids.length);
     for (const id of ["start", "stop", "pause", "resume", "finish", "recordElapsed",
@@ -122,6 +126,11 @@ test("the branded record controls and four separate tiles exist on both platform
       "tileManual", "tileJobs", "tileResults", "tileSettings"]) assert.ok(ids.includes(id), id);
     assert.match(html, /LET’S<br>TAKEOFF!/);
     assert.doesNotMatch(html, /onclick=|IPHONE KEYBOARD DICTATION/);
-    if (!nativeAvailable) assert.match(html, /This browser never starts recording and does not capture or upload audio/);
+    assert.ok(ids.includes("retryBrowserTranscription"));
+    assert.ok(ids.includes("discardBrowserAudio"));
+    if (!nativeAvailable) {
+      assert.doesNotMatch(html, /Browser voice recording is ready|Current estimate:/);
+      assert.match(html, /Transcription starts after Stop/);
+    }
   }
 });

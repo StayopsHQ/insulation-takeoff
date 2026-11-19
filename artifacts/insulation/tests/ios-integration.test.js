@@ -20,26 +20,38 @@ test("the iOS app starts the custom Capacitor bridge with WhisperKit registered"
   assert.match(plugin, /import WhisperKit/);
 });
 
-test("the browser app has no remote or browser-based audio transcription fallback", async () => {
-  const [main, api] = await Promise.all([
+test("the browser sends completed recordings through the Worker while native capture stays separate", async () => {
+  const [main, api, worker, localRunner] = await Promise.all([
     readProjectFile("src/main.js"),
-    readProjectFile("src/api.js")
+    readProjectFile("src/api.js"),
+    readProjectFile("worker/index.js"),
+    readProjectFile("scripts/start-local-worker.mjs")
   ]);
 
-  assert.doesNotMatch(main, /SpeechRecognition|MediaRecorder|getUserMedia|api\.transcribe/);
-  assert.doesNotMatch(api, /transcribe\s*:/);
+  assert.match(main, /createBrowserVoiceRecorder/);
+  assert.match(main, /browserRecorder\.start\(\)/);
+  assert.match(main, /api\.transcribeAudio\(context\.jobId, state\.browserAudioBlob\)/);
+  assert.match(api, /transcribeAudio:/);
+  assert.match(api, /options\.body instanceof FormData/);
+  assert.match(worker, /https:\/\/api\.openai\.com\/v1\/audio\/transcriptions/);
+  assert.match(worker, /env\.OPENAI_API_KEY/);
+  assert.match(localRunner, /OPENAI_API_KEY/);
+  assert.match(localRunner, /mode: 0o600/);
+  assert.doesNotMatch(main, /SpeechRecognition|Deepgram|OPENAI_API_KEY/);
+  assert.doesNotMatch(worker, /Deepgram/i);
 });
 
-test("native recording is primary and manual entry remains a separate browser option", async () => {
+test("native recording stays primary on iPhone and browser OpenAI recording is a separate path", async () => {
   const main = await readProjectFile("src/main.js");
   const view = await readProjectFile("src/voiceTakeoffView.js");
   const bridge = await readProjectFile("src/voiceTranscription.js");
 
-  assert.match(main, /renderVoiceTakeoff\(\{ nativeAvailable: nativeVoiceAvailable \}\)/);
+  assert.match(main, /renderVoiceTakeoff\(\{[\s\S]*nativeAvailable: nativeVoiceAvailable,[\s\S]*browserTranscriptionAvailable/);
   assert.match(main, /id="manualText" rows="7"/);
   assert.match(main, /document\.querySelector\("#saveManual"\)\?\.addEventListener\("click", saveManual\)/);
   assert.match(main, /function saveManual\(\)[\s\S]*?parseTranscript\(text, currentSectionContext\(\), state\.material\)/);
-  assert.match(view, /Recording needs the installed iPhone app/);
+  assert.doesNotMatch(view, /Browser voice recording is ready/);
+  assert.match(view, /OpenAI transcription is not configured/);
   assert.match(bridge, /Capacitor\.isPluginAvailable\("WhisperVoice"\)/);
   assert.doesNotMatch(main, /IPHONE KEYBOARD DICTATION/);
   assert.match(main, /document\.querySelector\("#start"\)\?\.addEventListener\("click", startVoiceTranscription\)/);

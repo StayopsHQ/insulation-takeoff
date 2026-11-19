@@ -39,13 +39,18 @@ function tile(id, key, label, hint) {
     </button>`;
 }
 
-export function renderVoiceTakeoff({ nativeAvailable = false } = {}) {
+export function renderVoiceTakeoff({
+  nativeAvailable = false,
+  browserTranscriptionAvailable = false,
+  browserCaptureSupported = false
+} = {}) {
   const native = Boolean(nativeAvailable);
+  const browser = !native && Boolean(browserTranscriptionAvailable && browserCaptureSupported);
   return `
     <section class="vt-card" aria-labelledby="vtHeading">
       <h2 id="vtHeading" class="vt-visually-hidden">Voice takeoff</h2>
       <div class="vt-statusbar">
-        <span id="recordState" class="vt-state" role="status" data-state="${native ? "ready" : "unavailable"}">${native ? "Ready on iPhone" : "Installed iPhone app required"}</span>
+        <span id="recordState" class="vt-state" role="status" data-state="${native || browser ? "ready" : "unavailable"}">${native ? "Ready on iPhone" : browser ? "OpenAI transcription ready" : "Voice recording unavailable"}</span>
         <span id="recordElapsed" class="vt-elapsed" aria-label="Elapsed recording time">00:00</span>
       </div>
 
@@ -59,13 +64,13 @@ export function renderVoiceTakeoff({ nativeAvailable = false } = {}) {
         </div>
       </div>
 
-      ${native ? "" : `
+      ${native || browser ? "" : `
       <p id="nativeVoiceNotice" class="vt-notice">
-        <strong>Recording needs the installed iPhone app.</strong>
-        On-device WhisperKit runs only there. This browser never starts recording and does not capture or upload audio. Use Manual Entry below instead.
+        <strong>${browserCaptureSupported ? "OpenAI transcription is not configured." : "This browser cannot record audio."}</strong>
+        ${browserCaptureSupported ? "Add the OpenAI API credential to the Worker to enable recording. The browser will not capture audio until transcription is configured." : "Try a current browser with microphone permission, or use Manual Entry."}
       </p>`}
 
-      <p id="voiceStatus" class="vt-model-status">${native ? "First use downloads about 626 MB. Transcription runs on this iPhone; saving jobs needs internet." : "Speech model not available in the browser."}</p>
+      <p id="voiceStatus" class="vt-model-status">${native ? "First use downloads about 626 MB. Transcription runs on this iPhone; saving jobs needs internet." : browser ? "Transcription starts after Stop. Review the returned text before processing measurements." : "Browser voice recording is unavailable until OpenAI transcription is configured."}</p>
       <progress id="modelProgress" class="vt-progress" aria-label="Preparing on-device speech model" hidden></progress>
 
       <div class="vt-live" aria-live="polite">
@@ -74,12 +79,18 @@ export function renderVoiceTakeoff({ nativeAvailable = false } = {}) {
       </div>
 
       <div id="voiceReviewPanel" class="vt-review" hidden>
-        <label for="voiceReviewText" class="vt-review-label">Review transcript</label>
-        <textarea id="voiceReviewText" rows="7" spellcheck="true" autocapitalize="sentences"></textarea>
-        <button id="processVoiceReview" type="button" class="vt-process">Process measurements</button>
+        <details><summary>Full dictation / edit transcript</summary>
+          <label for="voiceReviewText" class="vt-review-label">Review transcript</label>
+          <textarea id="voiceReviewText" rows="7" spellcheck="true" autocapitalize="sentences"></textarea>
+        </details>
+        <button id="processVoiceReview" type="button" class="vt-process">Review measurements</button>
+        <div id="voiceBatchReview"></div>
+        <button id="confirmVoiceBatch" type="button" class="vt-process" hidden>Confirm &amp; save measurements</button>
         <button id="discardVoiceReview" type="button" class="vt-discard">Discard recording text</button>
         <p id="voiceReviewStatus" class="vt-review-status" role="status"></p>
       </div>
+      <button id="retryBrowserTranscription" type="button" class="vt-process" hidden>Retry transcription</button>
+      <button id="discardBrowserAudio" type="button" class="vt-discard" hidden>Discard untranscribed audio</button>
     </section>
 
     <nav class="vt-tiles" aria-label="Takeoff tools">

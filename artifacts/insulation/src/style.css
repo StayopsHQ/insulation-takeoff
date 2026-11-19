@@ -1,3 +1,19 @@
+.voice-batch-section h4 { margin: 18px 0 8px; text-transform: capitalize; }
+.takeoff-totals { padding: 14px 0; border-top: 2px solid #123354; }
+.takeoff-totals dl { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.takeoff-totals dt, .takeoff-totals dd { margin: 0; }
+.takeoff-totals dd { font-weight: 700; color: #123354; }
+.voice-batch-section { margin-top: 14px; border-top: 2px solid #d7e0eb; }
+.voice-measurement-list { list-style: none; margin: 0; padding: 0; }
+.voice-measurement-row { padding: 10px 0; border-bottom: 1px solid #d7e0eb; }
+.voice-batch-issue { margin: 10px 0; padding: 12px; border: 1px solid #d7e0eb; border-radius: 12px; }
+.voice-measurement-row textarea, .voice-batch-issue textarea { width: 100%; min-height: 64px; font-size: 16px; }
+.voice-measurement-row select, .voice-batch-issue select { width: 100%; font-size: 16px; }
+.voice-batch-result { font-weight: 700; color: #123354; }
+.voice-batch-applied { font-size: 13px; color: #18583e; }
+.voice-batch-issue { border-color: #e4b9a0; background: #fff9f5; }
+.voice-batch-issue blockquote { margin: 8px 0; overflow-wrap: anywhere; }
+.voice-batch-issue button { margin: 6px 0; width: 100%; min-height: 44px; }
 * { box-sizing: border-box; }
 :root { color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #102b4c; background: #f8fafc; }
 body { margin: 0; min-width: 320px; background: #f8fafc; }
@@ -337,3 +353,19 @@ textarea { resize: vertical; }
 .vt-discard { width: 100%; min-height: 46px; margin-top: 8px; border-color: #ecc4ca; background: #fff; color: #b51d35; font-size: 14px; transition: transform .14s ease, background .14s ease; }
 .vt-discard:active { transform: scale(.98); background: #fff0f2; }
 @media (prefers-reduced-motion: reduce) { .vt-discard { transition: none; } .vt-discard:active { transform: none; } }
+.entry-interpreted { margin: 8px 0; color: #304a66; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.entry-interpreted span { font-weight: 750; }
+.entry-form-override { margin-top: 10px; padding: 9px 10px; border: 1px solid #dfe5ed; border-radius: 11px; background: #f8fafc; }
+.entry-form-override summary { color: #304a66; font-size: 12px; font-weight: 700; cursor: pointer; }
+.entry-form-override label { margin-top: 9px; font-size: 12px; }
+.entry-form-override input { min-height: 40px; font-size: 15px; }
+.entry-form-override button { min-height: 42px; margin-top: 8px; }
+.entry-form-override small { display: block; margin-top: 7px; color: #62758a; font-size: 11px; }
+.takeoff-finish { margin-top: 16px; padding-top: 14px; border-top: 1px solid #e1e7ee; }
+.takeoff-finish .block { min-height: 52px; }
+.takeoff-finish-hint { margin: 8px 2px 0; color: #62758a; font-size: 12px; line-height: 1.45; }
+.takeoff-pdf-output { display: grid; gap: 10px; margin-top: 12px; padding: 13px; border: 1px solid #d6e2ee; border-radius: 12px; background: #f5f8fc; }
+.takeoff-pdf-output[hidden] { display: none; }
+.takeoff-pdf-output p { margin: 0; color: #304a66; font-size: 13px; }
+.takeoff-pdf-output a { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 9px 12px; border: 1px solid #cbd8e5; border-radius: 10px; color: #102f55; font-weight: 700; text-decoration: none; }
+.takeoff-pdf-output a:focus-visible { outline: 3px solid #d3233d; outline-offset: 2px; }

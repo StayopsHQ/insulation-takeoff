@@ -1,7 +1,13 @@
+import { passwordHash, verifyPassword } from "./passwords.js";
+import { interpretRecording } from "./interpretation.js";
+import { SECTIONS } from "../src/interpretationContract.js";
+
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
 const SESSION_COOKIE = "takeoff_session";
 const NATIVE_APP_ORIGIN = "capacitor://localhost";
 const encoder = new TextEncoder();
+const MAX_TRANSCRIPTION_BYTES = 24 * 1024 * 1024;
+const TRANSCRIPTION_PROMPT = "Insulation construction takeoff. Terms may include exterior walls, basement exterior, party walls, band joists, batt ceilings, attic, baffles, slopes, garage ceiling, sill, caulk, foam, R-values, bays, 2x4, 2x6, and inches on center.";
 
 function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), { status, headers: { ...JSON_HEADERS, ...headers } });
@@ -58,32 +64,8 @@ function base64url(bytes) {
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
-function fromBase64url(value) {
-  const base64 = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4);
-  return Uint8Array.from(atob(base64), char => char.charCodeAt(0));
-}
 async function sha256(value) {
   return base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value))));
-}
-// Store the PBKDF2 work factor with each new hash so sign-in uses the
-// exact parameters used at account creation. Legacy hashes keep their old factor.
-const PASSWORD_HASH_ITERATIONS = 100000;
-const LEGACY_PASSWORD_HASH_ITERATIONS = 310000;
-
-async function passwordHash(password, salt, iterations = PASSWORD_HASH_ITERATIONS) {
-  const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: fromBase64url(salt), iterations, hash: "SHA-256" }, material, 256);
-  return base64url(new Uint8Array(bits));
-}
-
-function storedPasswordHash(hash, iterations = PASSWORD_HASH_ITERATIONS) {
-  return `pbkdf2-sha256:${iterations}:${hash}`;
-}
-
-function parseStoredPasswordHash(value) {
-  const match = /^pbkdf2-sha256:(\d+):([A-Za-z0-9_-]+)$/.exec(value || "");
-  if (match) return { iterations: Number(match[1]), hash: match[2] };
-  return { iterations: LEGACY_PASSWORD_HASH_ITERATIONS, hash: value };
 }
 function secureCookie(request, token, maxAge) {
   const nativeOrigin = request.headers.get("Origin") === NATIVE_APP_ORIGIN;
@@ -157,7 +139,7 @@ async function createUser(env, { email, password, displayName, role = "member" }
   }
   const name = requireString(displayName, "Display name", 100);
   const salt = base64url(crypto.getRandomValues(new Uint8Array(16)));
-  const hash = storedPasswordHash(await passwordHash(password, salt));
+  const hash = await passwordHash(password, salt);
   const id = makeId();
   try {
     await env.DB.prepare("INSERT INTO users (id,email,display_name,password_hash,password_salt,role,created_at) VALUES (?,?,?,?,?,?,?)")
@@ -182,6 +164,89 @@ async function handleApi(request, env, url) {
 
   if (path === "/api/health" && method === "GET") return json({ ok: true, service: "insulation-takeoff" });
 
+  if (path === "/api/transcription-status" && method === "GET") {
+    await requireUser(request, env);
+    return json({ available: Boolean(env.OPENAI_API_KEY), provider: "OpenAI", model: "gpt-transcribe" });
+  }
+
+  if (path === "/api/interpret" && method === "POST") {
+    const user = await requireUser(request, env);
+    if (!env.OPENAI_API_KEY) throw new HttpError(503, "OpenAI interpretation is not configured on this Worker.");
+    if (Number(request.headers.get("Content-Length") || 0) > 100000) throw new HttpError(413, "Transcript request too large.");
+    const body = await bodyJson(request);
+    const transcript = requireString(body.transcript, "Transcript", 20000);
+    const jobId = requireString(body.jobId, "Job ID", 200);
+    if (body.section != null && !SECTIONS.includes(body.section)) throw new HttpError(400, "Unsupported section context.");
+    await hasJobAccess(env, jobId, user.id, true);
+    return json(await interpretRecording({ transcript, section: body.section }, env));
+  }
+
+  if (path === "/api/transcribe" && method === "POST") {
+    const user = await requireUser(request, env);
+    if (!env.OPENAI_API_KEY) throw new HttpError(503, "OpenAI transcription is not configured on this Worker.");
+
+    const contentLength = Number(request.headers.get("Content-Length") || 0);
+    if (contentLength > MAX_TRANSCRIPTION_BYTES + 64 * 1024) {
+      throw new HttpError(413, "This recording is too large. Stop and submit a shorter recording.");
+    }
+    if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("multipart/form-data")) {
+      throw new HttpError(415, "Upload the recording as multipart audio.");
+    }
+
+    let form;
+    try { form = await request.formData(); }
+    catch { throw new HttpError(400, "The audio upload could not be read. Please try recording again."); }
+    const audio = form.get("audio");
+    const jobId = requireString(form.get("jobId"), "Job ID", 200);
+    if (!audio || typeof audio.arrayBuffer !== "function" || typeof audio.size !== "number") {
+      throw new HttpError(400, "An audio recording is required.");
+    }
+    if (!audio.size) throw new HttpError(400, "The recording is empty.");
+    if (audio.size > MAX_TRANSCRIPTION_BYTES) {
+      throw new HttpError(413, "This recording is too large. Stop and submit a shorter recording.");
+    }
+    const mimeType = String(audio.type || "").split(";")[0].toLowerCase();
+    const supportedAudioTypes = new Set([
+      "audio/flac", "audio/mp3", "audio/mpeg", "audio/mpga", "audio/mp4",
+      "audio/m4a", "audio/x-m4a", "audio/ogg", "audio/wav", "audio/x-wav",
+      "audio/webm"
+    ]);
+    if (!supportedAudioTypes.has(mimeType)) {
+      throw new HttpError(415, "This browser audio format is not supported. Use a current Safari or Chrome browser.");
+    }
+    await hasJobAccess(env, jobId, user.id, true);
+
+    const upstreamForm = new FormData();
+    upstreamForm.set("file", audio, audio.name || (mimeType === "audio/mp4" ? "takeoff.m4a" : "takeoff.webm"));
+    upstreamForm.set("model", "gpt-transcribe");
+    upstreamForm.set("prompt", TRANSCRIPTION_PROMPT);
+    let upstream;
+    try {
+      upstream = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` },
+        body: upstreamForm
+      });
+    } catch {
+      throw new HttpError(502, "OpenAI could not be reached. Check the connection and retry the recording.");
+    }
+
+    let result;
+    try { result = await upstream.json(); }
+    catch { throw new HttpError(502, "OpenAI returned an unreadable transcription response."); }
+    if (!upstream.ok) {
+      if (upstream.status === 429) throw new HttpError(429, "OpenAI rejected the request because of a rate or billing limit.");
+      if (upstream.status === 401 || upstream.status === 403) throw new HttpError(502, "OpenAI rejected the configured API credential.");
+      throw new HttpError(502, "OpenAI transcription failed. Retry the recording.");
+    }
+    const transcript = String(result?.text || "").trim();
+    if (!transcript) throw new HttpError(422, "OpenAI did not recognize speech in this recording.");
+    if (transcript.length > 5000) {
+      throw new HttpError(422, "This transcript is too long for one takeoff entry. Record a shorter section at a time.");
+    }
+    return json({ transcript, model: "gpt-transcribe" });
+  }
+
   if (path === "/api/setup" && method === "POST") {
     const body = await bodyJson(request);
     if (!env.SETUP_TOKEN || typeof body.setupToken !== "string" || body.setupToken !== env.SETUP_TOKEN) {
@@ -194,7 +259,7 @@ async function handleApi(request, env, url) {
     }
     const displayName = requireString(body.displayName, "Display name", 100);
     const salt = base64url(crypto.getRandomValues(new Uint8Array(16)));
-    const hash = storedPasswordHash(await passwordHash(body.password, salt));
+    const hash = await passwordHash(body.password, salt);
     const id = makeId();
     // A single conditional INSERT makes first-admin creation atomic under concurrent requests.
     const inserted = await env.DB.prepare(`
@@ -227,9 +292,8 @@ async function handleApi(request, env, url) {
       throw new HttpError(429, "Too many sign-in attempts. Wait 15 minutes and try again.");
     }
     const row = await env.DB.prepare("SELECT id,email,display_name,password_hash,password_salt,role FROM users WHERE email = ?").bind(email).first();
-    const stored = row ? parseStoredPasswordHash(row.password_hash) : null;
-    const candidate = row ? await passwordHash(body.password, row.password_salt, stored.iterations) : "";
-    if (!row || candidate !== stored.hash) {
+    const validPassword = row ? await verifyPassword(body.password, row.password_salt, row.password_hash) : false;
+    if (!validPassword) {
       await env.DB.prepare("INSERT INTO login_attempts (ip_key,email_key,attempted_at) VALUES (?,?,?)")
         .bind(keys.ip, keys.email, nowIso()).run();
       throw new HttpError(401, "Email or password is incorrect.");

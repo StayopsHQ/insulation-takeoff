@@ -1,5 +1,5 @@
 export const NATIVE_VOICE_REQUIRED =
-  "WhisperKit recording requires the installed iPhone app. This browser does not record or upload audio. Use Manual Entry here.";
+  "WhisperKit recording requires the installed iPhone app with its native plugin. No recording was started.";
 
 // Injectable bridge adapter: a resolved start() is NOT evidence that the mic is
 // listening. Only native transcriptionUpdate events can report isRecording.

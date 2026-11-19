@@ -1,7 +1,8 @@
 import {
   wallSquareFeet,
   atticTotals,
-  bandJoistTotal
+  bandJoistTotal,
+  slopeSquareFeet
 } from "./calculations.js";
 
 const NUMBER_WORDS = Object.freeze({
@@ -64,6 +65,11 @@ export function normalizeNumbers(input) {
     text = text.replace(new RegExp(`\\b${escaped}\\b`, "gi"), String(number));
   }
   return text
+    .replace(/\b(\d+)\s*[-‑–]\s*point\s*[-‑–]\s*(\d+(?:\s*[-‑–]\s*\d+)*)\b/g,
+      (_, whole, digits) => `${whole}.${digits.replace(/[\s\-‑–]/g, "")}`)
+    .replace(/\b(\d+)\s+point\s+(\d(?:\s+\d\b)*|\d+)\b/g,
+      (_, whole, digits) => `${whole}.${digits.replace(/\s/g, "")}`)
+    .replace(/\b(\d+(?:\.\d+)?)\s*[-‑–]\s*(?:by|x|times)\s*[-‑–]\s*(\d+(?:\.\d+)?)\b/g, "$1 x $2")
     .replace(/\b(\d+(?:\.\d+)?)\s+and\s+0\.5\b/g, (_, whole) => String(Number(whole) + 0.5))
     .replace(/\b(\d+(?:\.\d+)?)\s+and\s+(?:a\s+)?half\b/g, (_, whole) => String(Number(whole) + 0.5))
     .replace(/\b(\d+(?:\.\d+)?)\s*[-‑–]\s*(foot|feet|ft|inches?|in)\b/g, "$1 $2")
@@ -80,6 +86,42 @@ export function detectSection(input) {
   return SECTION_PATTERNS.find(([, pattern]) => pattern.test(text))?.[0] ?? null;
 }
 
+export function findSectionMentions(text) {
+  const mentions = [];
+  for (const [section, pattern] of SECTION_PATTERNS) {
+    const globalPattern = new RegExp(pattern.source, `${pattern.flags}g`);
+    for (const match of text.matchAll(globalPattern)) {
+      mentions.push({
+        section,
+        start: match.index,
+        end: match.index + match[0].length
+      });
+    }
+  }
+  mentions.sort((left, right) => left.start - right.start || right.end - left.end);
+
+  const nonOverlapping = [];
+  for (const mention of mentions) {
+    if (nonOverlapping.length && mention.start < nonOverlapping.at(-1).end) continue;
+    nonOverlapping.push(mention);
+  }
+  return nonOverlapping;
+}
+
+function hasUnlabeledSectionChangeCue(text, mentions) {
+  const cuePattern = /\b(?:next|another|different|other)\s+(?:area|section|room|space|spot|one)\b|\b(?:switch(?:ing)?|move(?:d|ing)?)\s+(?:over\s+)?to\b|\b(?:moving\s+on\s+to|back\s+to)\b/ig;
+  for (const cue of text.matchAll(cuePattern)) {
+    const cueEnd = cue.index + cue[0].length;
+    if (!mentions.some(mention => mention.start >= cueEnd)) return true;
+  }
+  return false;
+}
+
+function hasUnassignedMeasurement(text) {
+  const normalized = normalizeNumbers(text);
+  return /\d|\b(?:walls?|bays?|baffles?|joists?|ceilings?|attic|slopes?|garage|sills?|foam|caulk|sprinklers?|feet?|ft|inches?|centers?|r\s*-?\s*\d{2})\b/i.test(normalized);
+}
+
 function extractDimensionPairs(text) {
   const pairPattern = /(\d+(?:\.\d+)?)\s*(?:ft\s*)?x\s*(\d+(?:\.\d+)?)(?:\s*ft)?/gi;
   const pairs = [];
@@ -93,7 +135,6 @@ function extractDimensionPairs(text) {
 function sumPairAreas(pairs) {
   return pairs.reduce((sum, [length, width]) => sum + length * width, 0);
 }
-
 
 function sectionScopedText(text, section) {
   const selectedPattern = SECTION_PATTERNS.find(([name]) => name === section)?.[1];
@@ -127,6 +168,15 @@ function parseWall(text, section, result) {
   const height = text.match(/\b(8|9|10)\s*ft\b/);
   const bays = text.match(/\b(\d+(?:\.\d+)?)\s*bays?\b/)
     || text.match(/\b(?:bay\s+count|bays?)\s*(?:of\s*)?(\d+(?:\.\d+)?)\b/);
+  // Retain explicitly heard fields even before the wall is complete, so a
+  // correction can target its bay count without inventing missing dimensions.
+  result.parsed = {
+    ...result.parsed,
+    ...(framing ? { framing: `2x${framing[1]}` } : {}),
+    ...(spacing ? { spacing: Number(spacing[1]) } : {}),
+    ...(height ? { height: Number(height[1]) } : {}),
+    ...(bays ? { bays: Number(bays[1]) } : {})
+  };
 
   if (framing && spacing && height && bays) {
     const values = {
@@ -152,7 +202,7 @@ function parseWall(text, section, result) {
   }
 
   result.status = "needs_review";
-  result.message = "Section and material saved. Waiting for measurements, or review the entry.";
+  result.message = "Wall needs complete framing, bay count, height and spacing, or length-by-width dimensions. Nothing is saved until confirmed.";
 }
 
 export function parseTranscript(rawTranscript, currentSection = null, currentMaterial = null) {
@@ -233,6 +283,37 @@ export function parseTranscript(rawTranscript, currentSection = null, currentMat
     return result;
   }
 
+  if (section === "slopes") {
+    const matches = [...normalizedTranscript.matchAll(/(\d+(?:\.\d+)?)\s*(?:ft\s*)?x\s*(\d+(?:\.\d+)?)(?:\s*ft)?(?:\s*(?:x|by|times)\s*(\d+(?:\.\d+)?))?/gi)];
+    if (!matches.length) {
+      result.message = "Slope needs length and width; no missing dimension was guessed.";
+      return result;
+    }
+    const dimensionPairs = [];
+    const slopeFactors = [];
+    for (let index = 0; index < matches.length; index += 1) {
+      const match = matches[index];
+      const suffix = normalizedTranscript.slice(match.index + match[0].length, matches[index + 1]?.index ?? normalizedTranscript.length);
+      const statedFactor = suffix.match(/\b(?:with\s+(?:a\s+)?(1\.25|1(?:\.0+)?)\s+factor|factor\s*(?:of\s*)?(1\.25|1(?:\.0+)?)|(1\.25|1(?:\.0+)?)\s+factor)\b/i);
+      const noFactor = /\b(?:no\s+(?:slope\s+)?factor|without\s+(?:a\s+)?factor)\b/i.test(suffix);
+      const factor = match[3] ? Number(match[3]) : statedFactor ? Number(statedFactor[1] || statedFactor[2] || statedFactor[3]) : noFactor ? 1 : null;
+      if ((factor != null && ![1, 1.25].includes(factor)) ||
+          (noFactor && factor !== 1) ||
+          (/\bfactor\b/i.test(suffix) && !statedFactor && !match[3] && !noFactor)) {
+        result.requiresReview = true;
+        result.message = "Review the stated slope factor. Only the explicitly confirmed 1.25 factor is supported.";
+        return result;
+      }
+      dimensionPairs.push([Number(match[1]), Number(match[2])]);
+      slopeFactors.push(factor);
+    }
+    const squareFeet = dimensionPairs.reduce((sum, pair, index) => sum + slopeSquareFeet(pair[0], pair[1], slopeFactors[index] ?? 1), 0);
+    result.parsed = { ...result.parsed, dimensionPairs, slopeFactors, squareFeet };
+    result.status = "calculated";
+    result.message = `${squareFeet} sq ft calculated${slopeFactors.includes(1.25) ? " using the explicitly stated 1.25 factor" : slopeFactors.includes(1) ? " with no factor (multiplier 1)" : ""}.`;
+    return result;
+  }
+
   const pairs = extractDimensionPairs(normalizedTranscript);
   if (pairs.length) {
     const area = sumPairAreas(pairs);
@@ -244,4 +325,76 @@ export function parseTranscript(rawTranscript, currentSection = null, currentMat
 
   result.message = `Entry saved under ${section}; waiting for measurements or a configured quantity rule.`;
   return result;
+}
+
+export function parseTranscriptAreas(rawTranscript, currentSection = null, currentMaterial = null) {
+  const transcript = String(rawTranscript ?? "");
+  const mentions = findSectionMentions(transcript);
+  const leadingText = mentions.length ? transcript.slice(0, mentions[0].start) : "";
+  const distinctSections = new Set(mentions.map(mention => mention.section));
+  const selectedSection = normalizeSectionContext(currentSection);
+  const hasLeadingMeasurement = hasUnassignedMeasurement(leadingText);
+
+  if (hasUnlabeledSectionChangeCue(transcript, mentions)) {
+    return {
+      entries: [],
+      clarificationRequired: true,
+      message: "I couldn't identify the section after the area change. Edit the transcript to name it before processing."
+    };
+  }
+
+  const needsInitialArea = hasLeadingMeasurement && selectedSection !== mentions[0]?.section;
+  if (distinctSections.size < 2 && !needsInitialArea) {
+    return {
+      entries: [parseTranscript(transcript, currentSection, currentMaterial)],
+      clarificationRequired: false
+    };
+  }
+
+  let leadingEntry = null;
+  if (hasLeadingMeasurement && !selectedSection) {
+    return {
+      entries: [],
+      clarificationRequired: true,
+      message: "Some measurements come before the first clearly named section. Edit the transcript to identify their section before processing."
+    };
+  }
+  if (hasLeadingMeasurement) {
+    leadingEntry = parseTranscript(leadingText.trim(), selectedSection, currentMaterial);
+    if (!leadingEntry.section || (leadingEntry.status !== "calculated" && !leadingEntry.requiresReview)) {
+      return {
+        entries: [],
+        clarificationRequired: true,
+        message: "Some measurements come before the first clearly named section. Edit the transcript to identify their section before processing."
+      };
+    }
+  }
+
+  const boundaries = mentions.filter((mention, index) =>
+    index === 0 || mention.section !== mentions[index - 1].section
+  );
+  const leadingJoinsFirst = leadingEntry?.section === mentions[0]?.section;
+  const entries = boundaries.map((mention, index) => {
+    const start = index === 0 && leadingJoinsFirst ? 0 : mention.start;
+    const end = boundaries[index + 1]?.start ?? transcript.length;
+    return parseTranscript(transcript.slice(start, end).trim(), mention.section, currentMaterial);
+  });
+  if (leadingEntry && !leadingJoinsFirst) entries.unshift(leadingEntry);
+
+  const incomplete = entries.find(entry =>
+    !entry.section || (entry.status !== "calculated" && !entry.requiresReview)
+  );
+  if (incomplete) {
+    return {
+      entries,
+      clarificationRequired: true,
+      message: incomplete.message || "Review the transcript so every named section has a measurement before processing."
+    };
+  }
+
+  return {
+    entries,
+    clarificationRequired: false,
+    message: `${entries.length} clearly named section entries are ready to add.`
+  };
 }

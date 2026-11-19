@@ -1,9 +1,15 @@
 import { api } from "./api.js";
 import { parseTranscript, detectSection, normalizeSectionContext } from "./parser.js";
-import { appendConfirmedSegments, appendPendingVoiceText, isCorrectionUtterance, pendingVoiceSegments, removeConfirmedInterim, replaceRunUnconfirmedSegments, shouldSaveVoiceResult, recordingTranscript, formatRecordingElapsed } from "./voiceSession.js";
-import { isWhisperKitAvailable, WhisperVoice } from "./voiceTranscription.js";
+import { appendConfirmedSegments, appendPendingVoiceText, pendingVoiceSegments, removeConfirmedInterim, replaceRunUnconfirmedSegments, shouldSaveVoiceResult, recordingTranscript, formatRecordingElapsed } from "./voiceSession.js";
+import { isNativePlatform, isWhisperKitAvailable, WhisperVoice } from "./voiceTranscription.js";
 import { createNativeVoiceRecorder, NATIVE_VOICE_REQUIRED } from "./nativeVoiceRecorder.js";
+import { createBrowserVoiceRecorder, isBrowserAudioAvailable } from "./browserVoiceRecorder.js";
 import { renderVoiceTakeoff } from "./voiceTakeoffView.js";
+import { createCompletedTakeoffPdf } from "./takeoffPdf.js";
+import { parseVoiceBatch, recalculateBatchItem, changeBatchSection, batchReadyItems, upgradeVoiceBatch } from "./voiceBatch.js";
+import { renderVoiceBatchReview } from "./voiceBatchView.js";
+import { interpretedVoiceBatch } from "./interpretedBatch.js";
+import { formRowChoices, resolveFormRow } from "./takeoffFormRows.js";
 
 const app = document.querySelector("#app");
 const state = {
@@ -13,7 +19,11 @@ const state = {
   pendingVoiceCorrection: null, voiceQueue: Promise.resolve(),
   voiceStarting: false, voiceReviewOpen: false, voiceReviewText: "", voiceReviewProcessed: false,
   voiceContext: null, voiceElapsedMs: 0, voiceTickStartedAt: null, manualDraft: "",
-  busy: false
+  voiceSaveProgress: 0, voiceSaveProgressText: "",
+  voiceBatch: null,
+  browserTranscriptionAvailable: false, transcriptionStatusChecked: false, transcriptionStatusLoading: false,
+  browserAudioBlob: null,
+  busy: false, takeoffPdfUrl: null, takeoffPdfBusy: false
 };
 let recordingTimer = null;
 const nativeRecorder = createNativeVoiceRecorder({
@@ -22,6 +32,22 @@ const nativeRecorder = createNativeVoiceRecorder({
   onUpdate: queueVoiceUpdate,
   onStatus: updateModelStatus,
   onError: handleRecordingError
+});
+const browserRecorder = createBrowserVoiceRecorder({
+  onError: error => {
+    state.voiceRecording = false;
+    state.voicePaused = false;
+    state.voiceBusy = false;
+    freezeRecordingClock();
+    setMessage(`Browser recording stopped: ${error.message}`, "error");
+    updateRecordingControls();
+  },
+  onLimit: () => {
+    if (state.voiceRecording) {
+      pauseVoiceTranscription();
+      setMessage("Recording paused at the upload size limit. Tap Stop when you are ready to transcribe this recording.");
+    }
+  }
 });
 
 const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({
@@ -214,6 +240,8 @@ function renderNewJob() {
 
 async function openJob(id) {
   try {
+    if (state.takeoffPdfUrl) URL.revokeObjectURL(state.takeoffPdfUrl);
+    state.takeoffPdfUrl = null;
     const job = state.jobs.find(item => item.id === id) || (await api.listJobs()).jobs.find(item => item.id === id);
     if (!job) throw new Error("Job not found.");
     state.activeJob = job;
@@ -233,6 +261,9 @@ async function openJob(id) {
     state.voiceReviewOpen = false;
     state.voiceReviewText = "";
     state.voiceReviewProcessed = false;
+    state.voiceSaveProgress = 0;
+    state.voiceSaveProgressText = "";
+    state.voiceBatch = null;
     state.voiceContext = null;
     freezeRecordingClock();
     state.voiceElapsedMs = 0;
@@ -245,7 +276,10 @@ async function openJob(id) {
 function renderJob() {
   const job = state.activeJob;
   if (!job) return renderDashboard();
+  if (state.takeoffPdfUrl) URL.revokeObjectURL(state.takeoffPdfUrl);
+  state.takeoffPdfUrl = null;
   const nativeVoiceAvailable = isWhisperKitAvailable();
+  const browserCaptureSupported = !isNativePlatform() && isBrowserAudioAvailable();
   renderShell(`
     <div class="job-page">
       <div class="brand-banner"><img src="/fulcher-logo.png" alt="Fulcher #1"></div>
@@ -258,7 +292,11 @@ function renderJob() {
         <span class="status">${escapeHtml(job.status)}</span>
       </div>
 
-      ${renderVoiceTakeoff({ nativeAvailable: nativeVoiceAvailable })}
+      ${renderVoiceTakeoff({
+        nativeAvailable: nativeVoiceAvailable,
+        browserTranscriptionAvailable: state.browserTranscriptionAvailable,
+        browserCaptureSupported
+      })}
       ${renderVoiceCorrection()}
 
       <section id="measurementsPanel" class="card measurements-card">
@@ -277,6 +315,15 @@ function renderJob() {
         </details>
         <div class="measurements-title"><h2>Measurements</h2><span>${state.entries.length} ${state.entries.length === 1 ? "entry" : "entries"}</span></div>
         <div id="entries">${renderEntries()}</div>
+        <section class="takeoff-finish" aria-label="Finish takeoff">
+          ${button("Finish & save original form", "finishTakeoff", "primary block")}
+          <p class="takeoff-finish-hint">Review or edit each measurement above, then create the original two-page takeoff form.</p>
+          <div id="takeoffPdfOutput" class="takeoff-pdf-output" hidden>
+            <p id="takeoffPdfStatus" role="status"></p>
+            <a id="openTakeoffPdf" target="_blank" rel="noopener">Open / print completed form</a>
+            <a id="downloadTakeoffPdf">Download PDF</a>
+          </div>
+        </section>
       </section>
 
         <details id="manualPanel" class="card collapsible-card">
@@ -309,6 +356,11 @@ function renderJob() {
     state.section = event.target.value || null;
     if (state.voiceContext?.jobId === state.activeJob.id && !state.voiceRecording && !state.voicePaused) {
       state.voiceContext.section = state.section;
+      if (state.voiceBatch && !state.voiceBatch.interpretationAttempts && !state.voiceBatch.items.some(item => item.saved)) {
+        state.voiceBatch = parseVoiceBatch(state.voiceReviewText, state.section, state.voiceContext.material || state.material);
+        renderBatchReview();
+        updateRecordingControls();
+      }
     }
     persistVoiceDraft();
     document.querySelector("#currentSection").textContent = state.section || "Choose a section";
@@ -319,9 +371,17 @@ function renderJob() {
   document.querySelector("#stop")?.addEventListener("click", finishVoiceTranscription);
   document.querySelector("#finish")?.addEventListener("click", finishVoiceTranscription);
   document.querySelector("#processVoiceReview").addEventListener("click", processVoiceReview);
+  document.querySelector("#confirmVoiceBatch").addEventListener("click", confirmVoiceBatch);
   document.querySelector("#discardVoiceReview").addEventListener("click", discardVoiceReview);
+  document.querySelector("#retryBrowserTranscription").addEventListener("click", transcribeBrowserRecording);
+  document.querySelector("#discardBrowserAudio").addEventListener("click", discardBrowserAudio);
   document.querySelector("#voiceReviewText").addEventListener("input", event => {
+    if (state.voiceBatch?.items.some(item => item.saved)) return;
     state.voiceReviewText = event.target.value;
+    // Keep the per-recording attempt budget when editing the full transcript.
+    // Individual measurement edits below are local and never invoke GPT.
+    if (!state.voiceBatch?.interpretationAttempts) state.voiceBatch = null;
+    renderBatchReview();
     persistVoiceDraft();
   });
   document.querySelector("#manualText").addEventListener("input", event => {
@@ -338,11 +398,38 @@ function renderJob() {
   document.querySelector("#toggleComplete").addEventListener("click", toggleComplete);
   document.querySelector("#shareJob").addEventListener("click", shareJob);
   document.querySelector("#exportCsv").addEventListener("click", exportCsv);
-  document.querySelector("#printJob").addEventListener("click", () => window.print());
+  document.querySelector("#printJob").addEventListener("click", finishTakeoff);
+  document.querySelector("#finishTakeoff").addEventListener("click", finishTakeoff);
   document.querySelectorAll("[data-edit]").forEach(node => node.addEventListener("click", () => editEntry(node.dataset.edit)));
   document.querySelectorAll("[data-delete]").forEach(node => node.addEventListener("click", () => deleteEntry(node.dataset.delete)));
   document.querySelectorAll("[data-undo]").forEach(node => node.addEventListener("click", () => deleteEntry(node.dataset.undo)));
+  document.querySelectorAll("[data-save-form-quantity]").forEach(node =>
+    node.addEventListener("click", () => saveFormQuantity(node.dataset.saveFormQuantity))
+  );
+  document.querySelectorAll("[data-form-material]").forEach(node =>
+    node.addEventListener("change", () => saveFormMaterial(node.dataset.formMaterial, node.value))
+  );
+  document.querySelectorAll("[data-sprinkler-form-material]").forEach(node =>
+    node.addEventListener("change", () => saveFormMaterial(node.dataset.sprinklerFormMaterial, node.value, true))
+  );
+  renderBatchReview();
   updateRecordingControls();
+  if (!nativeVoiceAvailable) loadBrowserTranscriptionStatus(job.id);
+}
+
+async function loadBrowserTranscriptionStatus(jobId) {
+  if (state.transcriptionStatusChecked || state.transcriptionStatusLoading || !api.transcriptionStatus) return;
+  state.transcriptionStatusLoading = true;
+  try {
+    const status = await api.transcriptionStatus();
+    state.browserTranscriptionAvailable = status.available === true;
+  } catch {
+    state.browserTranscriptionAvailable = false;
+  } finally {
+    state.transcriptionStatusLoading = false;
+    state.transcriptionStatusChecked = true;
+  }
+  if (state.activeJob?.id === jobId && !state.voiceRecording && !state.voiceBusy) renderJob();
 }
 
 function revealJobPanel(selector, focusSelector) {
@@ -402,7 +489,7 @@ function restoreVoiceDraft(jobId) {
     if (!saved) return;
     state.voiceTranscript = String(saved.transcript || "");
     state.voicePendingText = String(saved.pendingText || "");
-    state.pendingVoiceCorrection = saved.pendingCorrection || null;
+    state.pendingVoiceCorrection = saved.pendingCorrection?.fromVoiceReview ? null : saved.pendingCorrection || null;
     state.voiceUnconfirmed = Array.isArray(saved.unconfirmedSegments) ? saved.unconfirmedSegments : [];
     state.voiceCurrentText = String(saved.currentText || "");
     state.voiceRunId = saved.runId || null;
@@ -413,9 +500,22 @@ function restoreVoiceDraft(jobId) {
     state.voiceElapsedMs = Math.max(0, Number(saved.elapsedMs) || 0);
     state.voiceReviewProcessed = saved.reviewProcessed === true;
     state.voiceReviewText = String(saved.reviewText || "");
+    state.voiceSaveProgress = Math.max(0, Number(saved.voiceSaveProgress) || 0);
+    state.voiceSaveProgressText = String(saved.voiceSaveProgressText || "");
+    state.voiceBatch = saved.voiceBatch?.sourceText === state.voiceReviewText ? saved.voiceBatch : null;
+    if (!state.voiceReviewProcessed) {
+      state.voiceBatch = upgradeVoiceBatch(state.voiceBatch, state.voiceContext?.section || state.section, state.material);
+      if (state.voiceBatch?.items.length && state.voiceBatch.items.every(item => item.saved) &&
+          state.voiceBatch.issues.every(issue => issue.resolved)) state.voiceReviewProcessed = true;
+    }
     const interruptedTranscript = recordingTranscript(state.voiceTranscript, state.voiceUnconfirmed, state.voiceCurrentText, saved.runId);
-    state.voiceReviewOpen = Boolean(saved.reviewOpen || (saved.reviewVersion === 1 && interruptedTranscript && !state.voiceReviewProcessed));
+    state.voiceReviewOpen = saved.reviewOpen === true;
+    // Restoring an unfinished recording is not an instruction to finalize it.
+    state.voicePaused = isWhisperKitAvailable() && !state.voiceReviewOpen && Boolean(interruptedTranscript);
     if (state.voiceReviewOpen && !state.voiceReviewText) state.voiceReviewText = interruptedTranscript;
+    if (state.voiceReviewOpen && !state.voiceReviewProcessed && !state.voiceBatch) {
+      state.voiceBatch = parseVoiceBatch(state.voiceReviewText, state.voiceContext?.section || state.section, state.material);
+    }
   } catch {
     state.voiceTranscript = "";
     state.voicePendingText = "";
@@ -438,6 +538,9 @@ function persistVoiceDraft() {
       reviewOpen: state.voiceReviewOpen,
       reviewText: state.voiceReviewText,
       reviewProcessed: state.voiceReviewProcessed,
+      voiceSaveProgress: state.voiceSaveProgress,
+      voiceSaveProgressText: state.voiceSaveProgressText,
+      voiceBatch: state.voiceBatch,
       context: state.voiceContext,
       section: state.section,
       material: state.material,
@@ -452,18 +555,115 @@ function renderEntries() {
   if (!state.entries.length) return `<p class="empty">No measurements recorded yet.</p>`;
   return state.entries.map(entry => {
     const parsed = entry.parsed || {};
-    const quantity = parsed.quantity ?? parsed.squareFeet ?? parsed.area ?? parsed.blownInsulation;
-    const unit = parsed.unit || "sq ft";
+    const quantity = parsed.manualQuantity ?? parsed.quantity ?? parsed.squareFeet ?? parsed.area ?? parsed.blownInsulation;
+    const unit = parsed.manualQuantity != null ? parsed.manualUnit || "units" : parsed.unit || "sq ft";
     const calculated = entry.status === "calculated";
+    const id = escapeHtml(entry.id);
     return `<article class="entry">
       <div class="entry-head"><strong>${escapeHtml(entry.section || "Unassigned")}${parsed.material ? ` · ${escapeHtml(parsed.material)}` : ""}</strong><span class="pill ${calculated ? "good" : "review"}">${calculated ? "Added" : "Needs attention"}</span></div>
       <p>${escapeHtml(entry.rawTranscript || entry.message || "")}</p>
-      ${quantity != null ? `<p class="quantity">${escapeHtml(quantity)} ${escapeHtml(unit)}</p>` : ""}
+      ${renderInterpretedFields(parsed)}
+      ${quantity != null ? `<p class="quantity">${parsed.manualQuantity != null ? "Form quantity (manual): " : ""}${escapeHtml(quantity)} ${escapeHtml(unit)}</p>` : ""}
       ${parsed.sprinklerInsulation != null ? `<small>Sprinkler insulation: ${escapeHtml(parsed.sprinklerInsulation)} sq ft · Blown: ${escapeHtml(parsed.blownInsulation)} sq ft</small>` : ""}
       ${!calculated && entry.message ? `<small class="entry-message">${escapeHtml(entry.message)}</small>` : ""}
-      <div class="entry-actions"><button data-edit="${escapeHtml(entry.id)}">Edit</button><button data-delete="${escapeHtml(entry.id)}" class="danger-outline">Delete</button></div>
+      <label>Original form material row
+        <select data-form-material="${id}">
+          <option value="">Choose the exact printed material…</option>
+          ${formRowChoices(entry).map(row => `<option value="${escapeHtml(row.id)}"${resolveFormRow(entry)?.id === row.id ? " selected" : ""}>${escapeHtml(`${row.section} · ${row.material}`)}</option>`).join("")}
+        </select>
+      </label>
+      ${parsed.sprinklerInsulation > 0 ? `<label>Sprinkler material on original form
+        <select data-sprinkler-form-material="${id}">
+          <option value="">Choose R-38 or R-49…</option>
+          ${["R-38", "R-49"].map(material => `<option${parsed.sprinklerFormMaterial === material ? " selected" : ""}>${material}</option>`).join("")}
+        </select>
+      </label>` : ""}
+      <details class="entry-form-override">
+        <summary>Adjust quantity for form (optional)</summary>
+        <label>Quantity
+          <input data-form-quantity="${id}" type="number" min="0" step="any" inputmode="decimal" value="${parsed.manualQuantity == null ? "" : escapeHtml(parsed.manualQuantity)}" placeholder="Leave blank to use the existing result">
+        </label>
+        <label>Unit
+          <input data-form-unit="${id}" maxlength="16" value="${escapeHtml(parsed.manualUnit || parsed.unit || "sq ft")}" placeholder="sq ft, pieces, linear ft">
+        </label>
+        <button type="button" data-save-form-quantity="${id}">Save form quantity</button>
+        <small>Uses the value you enter. The app does not apply a formula.</small>
+      </details>
+      <div class="entry-actions"><button data-edit="${id}">Edit</button><button data-delete="${id}" class="danger-outline">Delete</button></div>
     </article>`;
   }).join("");
+}
+
+function renderInterpretedFields(parsed) {
+  const fields = [];
+  if (parsed.bays != null) fields.push(`${parsed.bays} bays`);
+  if (parsed.framing) fields.push(parsed.framing);
+  if (parsed.height != null) fields.push(`${parsed.height} ft`);
+  if (parsed.spacing != null) fields.push(`${parsed.spacing} in. on center`);
+  if (Array.isArray(parsed.dimensionPairs)) {
+    fields.push(...parsed.dimensionPairs.map((pair, index) => `${pair[0]} × ${pair[1]} ft${parsed.slopeFactors?.[index] != null ? ` × ${parsed.slopeFactors[index]} factor` : ""}`));
+  }
+  if (Array.isArray(parsed.measurements)) fields.push(`Measurements: ${parsed.measurements.join(", ")}`);
+  if (parsed.area != null) fields.push(`Area ${parsed.area} sq ft`);
+  if (parsed.blownInsulation != null) fields.push(`Blown ${parsed.blownInsulation} sq ft`);
+  if (parsed.sprinklerInsulation != null) fields.push(`Sprinkler ${parsed.sprinklerInsulation} sq ft`);
+  if (parsed.quantity != null) fields.push(`${parsed.quantity} ${parsed.unit || ""}`.trim());
+  return fields.length
+    ? `<p class="entry-interpreted"><span>Interpreted:</span> ${escapeHtml(fields.join(" · "))}</p>`
+    : "";
+}
+
+async function finishTakeoff() {
+  if (!state.activeJob) return setMessage("Open a saved job before finishing its takeoff.", "error");
+  if (state.voiceRecording || state.voicePaused || state.voiceStarting || state.voiceBusy || state.busy) {
+    return setMessage("Stop and review the current recording before finishing the takeoff.", "info");
+  }
+  if (state.voiceReviewOpen && !state.voiceReviewProcessed && state.voiceReviewText.trim()) {
+    return setMessage("Process or discard the reviewed transcript before finishing the takeoff.", "info");
+  }
+  if (!state.entries.length) return setMessage("Add at least one measurement before finishing the takeoff.", "info");
+  if (state.takeoffPdfBusy) return;
+  const job = state.activeJob;
+  const entries = [...state.entries];
+  const buttonNode = document.querySelector("#finishTakeoff");
+  const printButton = document.querySelector("#printJob");
+  const output = document.querySelector("#takeoffPdfOutput");
+  const status = document.querySelector("#takeoffPdfStatus");
+  const openLink = document.querySelector("#openTakeoffPdf");
+  const downloadLink = document.querySelector("#downloadTakeoffPdf");
+  if (state.takeoffPdfUrl) URL.revokeObjectURL(state.takeoffPdfUrl);
+  state.takeoffPdfUrl = null;
+  output.hidden = true;
+  state.takeoffPdfBusy = true;
+  if (buttonNode) buttonNode.disabled = true;
+  if (printButton) printButton.disabled = true;
+  if (status) status.textContent = "Preparing the original takeoff form…";
+  try {
+    const response = await fetch("/takeoff-form.pdf", { cache: "no-store" });
+    if (!response.ok) throw new Error("The original takeoff form could not be loaded.");
+    const templateBytes = await response.arrayBuffer();
+    const pdfBytes = await createCompletedTakeoffPdf(templateBytes, {
+      job,
+      entries,
+      date: new Date()
+    });
+    if (state.activeJob?.id !== job.id) throw new Error("The active job changed while the form was being prepared. Reopen it and try again.");
+    if (state.takeoffPdfUrl) URL.revokeObjectURL(state.takeoffPdfUrl);
+    state.takeoffPdfUrl = URL.createObjectURL(new Blob([pdfBytes], { type: "application/pdf" }));
+    const filename = `${safeFilename(job.name)}-takeoff.pdf`;
+    openLink.href = state.takeoffPdfUrl;
+    downloadLink.href = state.takeoffPdfUrl;
+    downloadLink.download = filename;
+    output.hidden = false;
+    status.textContent = "Completed original form is ready. Open it to print or save it to Files.";
+    setMessage("Takeoff finished. The original two-page form is ready to open or download.", "success");
+  } catch (error) {
+    setMessage(error.message || "Could not create the completed takeoff form.", "error");
+  } finally {
+    state.takeoffPdfBusy = false;
+    if (buttonNode) buttonNode.disabled = false;
+    if (printButton) printButton.disabled = false;
+  }
 }
 
 async function saveMeasurement(parsed, onSaved) {
@@ -514,16 +714,47 @@ async function saveManual() {
 async function editEntry(id) {
   const entry = state.entries.find(item => item.id === id);
   if (!entry) return;
-  const corrected = window.prompt("Correct the spoken text. The entry will be recalculated.", entry.rawTranscript || "");
+  const corrected = window.prompt("Correct the spoken text. The entry will be recalculated.", entry.parsed?.interpretedTranscript || entry.rawTranscript || "");
   if (corrected === null) return;
   const parsed = parseTranscript(corrected, normalizeSectionContext(entry.section) || currentSectionContext(), entry.parsed?.material || state.material);
   if (!parsed.section) return setMessage(parsed.message, "info");
+  if (entry.parsed?.formMaterialId && formRowChoices(parsed).some(row => row.id === entry.parsed.formMaterialId)) {
+    parsed.parsed.formMaterialId = entry.parsed.formMaterialId;
+  }
+  if (entry.parsed?.originalVoiceTranscript) {
+    Object.assign(parsed.parsed, {
+      originalVoiceTranscript: entry.parsed.originalVoiceTranscript,
+      reviewedTranscript: entry.parsed.reviewedTranscript,
+      voiceJobNumber: entry.parsed.voiceJobNumber,
+      voiceArea: entry.parsed.voiceArea || null,
+      interpretedTranscript: corrected,
+      correctionHistory: [...(entry.parsed.correctionHistory || []), {
+        utterance: "Edited after confirmation", targetId: id,
+        previousText: entry.parsed.interpretedTranscript || entry.rawTranscript, finalText: corrected
+      }]
+    });
+  }
+  if (parsed.parsed.sprinklerInsulation > 0 && entry.parsed?.sprinklerFormMaterial) {
+    parsed.parsed.sprinklerFormMaterial = entry.parsed.sprinklerFormMaterial;
+  }
   try {
     const result = await api.updateMeasurement(id, parsed);
     state.entries = state.entries.map(item => item.id === id ? result.measurement : item);
+    syncSavedBatchEntry(result.measurement, corrected);
     renderJob();
     setMessage("Entry corrected. Review the recalculated result.");
   } catch (error) { setMessage(error.message, "error"); }
+}
+
+function syncSavedBatchEntry(measurement, text) {
+  const item = state.voiceBatch?.items.find(item => item.savedMeasurementId === measurement.id);
+  if (!item) return;
+  item.result = measurement;
+  if (text != null) item.text = text;
+  state.voiceReviewProcessed = state.voiceBatch.items.every(item =>
+    item.saved && item.result.status === "calculated" && !item.result.requiresReview) &&
+    state.voiceBatch.issues.every(issue => issue.resolved);
+  persistVoiceDraft();
 }
 
 async function deleteEntry(id) {
@@ -533,6 +764,54 @@ async function deleteEntry(id) {
     state.entries = state.entries.filter(item => item.id !== id);
     renderJob();
     setMessage("Measurement deleted.");
+  } catch (error) { setMessage(error.message, "error"); }
+}
+
+async function saveFormQuantity(id) {
+  if (state.busy || state.voiceBusy || state.voiceRecording || state.voicePaused) {
+    return setMessage("Stop the current recording before editing form quantities.", "info");
+  }
+  const entry = state.entries.find(item => item.id === id);
+  if (!entry) return;
+  const quantityText = document.querySelector(`[data-form-quantity="${id}"]`)?.value.trim() || "";
+  const unitText = document.querySelector(`[data-form-unit="${id}"]`)?.value.trim() || "";
+  const parsed = { ...(entry.parsed || {}) };
+  if (!quantityText) {
+    delete parsed.manualQuantity;
+    delete parsed.manualUnit;
+  } else {
+    const quantity = Number(quantityText);
+    if (!Number.isFinite(quantity) || quantity < 0) {
+      return setMessage("Enter a non-negative quantity, or leave it blank to use the existing result.", "error");
+    }
+    if (!unitText || unitText.length > 16) return setMessage("Enter a unit of 16 characters or fewer.", "error");
+    parsed.manualQuantity = quantity;
+    parsed.manualUnit = unitText;
+  }
+  try {
+    const result = await api.updateMeasurement(id, { parsed });
+    state.entries = state.entries.map(item => item.id === id ? result.measurement : item);
+    renderJob();
+    setMessage(quantityText ? "Manual form quantity saved; no formula was applied." : "Manual form quantity cleared.");
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
+}
+
+async function saveFormMaterial(id, materialId, sprinkler = false) {
+  if (state.busy || state.voiceBusy || state.voiceRecording || state.voicePaused) return;
+  const entry = state.entries.find(item => item.id === id);
+  if (!entry) return;
+  if (materialId && !(sprinkler ? ["R-38", "R-49"].includes(materialId) : formRowChoices(entry).some(row => row.id === materialId))) return setMessage("Choose a row from the original form for this section.", "error");
+  const parsed = { ...entry.parsed };
+  const key = sprinkler ? "sprinklerFormMaterial" : "formMaterialId";
+  if (materialId) parsed[key] = materialId;
+  else delete parsed[key];
+  try {
+    const result = await api.updateMeasurement(id, { parsed });
+    state.entries = state.entries.map(item => item.id === id ? result.measurement : item);
+    renderJob();
+    setMessage("Original form material selection saved. Calculated quantity is unchanged.");
   } catch (error) { setMessage(error.message, "error"); }
 }
 
@@ -606,11 +885,53 @@ function beginRecordingClock() {
   }, 250);
 }
 
-function openVoiceReview() {
+async function openVoiceReview() {
   freezeRecordingClock();
   state.voiceReviewOpen = true;
   state.voiceReviewText = recordingTranscript(state.voiceTranscript, state.voiceUnconfirmed, state.voiceCurrentText, state.voiceRunId);
+  state.pendingVoiceCorrection = null;
+  state.voiceBatch = parseVoiceBatch(state.voiceReviewText, state.voiceContext?.section || currentSectionContext(), state.voiceContext?.material || state.material);
+  await interpretVoiceReview();
   persistVoiceDraft();
+}
+
+async function interpretVoiceReview(explicitRetry = false) {
+  const text = state.voiceReviewText;
+  const context = state.voiceContext;
+  if (!text.trim() || !context || context.jobId !== state.activeJob?.id) return;
+  const prior = state.voiceBatch;
+  const attempts = prior?.interpretationAttempts || 0;
+  if (attempts && !explicitRetry) return;
+  if (attempts >= 2) return setMessage("Interpretation retry limit reached. Your transcript is preserved; use Manual Entry for further corrections.", "info");
+  state.voiceBusy = true;
+  // Persist the attempt BEFORE the network call: reloads must not trigger spending.
+  prior.interpretationAttempts = attempts + 1;
+  prior.validationBlocked = true;
+  prior.interpretationError = "Interpreting the complete recording…";
+  persistVoiceDraft();
+  updateRecordingControls();
+  try {
+    const response = await api.interpretTranscript(context.jobId, text, context.section);
+    if (context.jobId !== state.activeJob?.id || text !== state.voiceReviewText) return;
+    prior.usage = response.usage;
+    if (response.error) {
+      prior.usage = response.usage;
+      throw new Error(response.error);
+    }
+    const batch = interpretedVoiceBatch(text, response.interpretation, context.material || state.material, response.usage);
+    batch.interpretationAttempts = attempts + 1;
+    state.voiceBatch = batch;
+  } catch (error) {
+    prior.interpretationError = error.message || "Interpretation failed validation.";
+    // Legacy parser remains a clearly labeled, UNSAVABLE comparison on failure.
+    prior.validationBlocked = true;
+    state.voiceBatch = prior;
+  } finally {
+    state.voiceBusy = false;
+    persistVoiceDraft();
+    renderBatchReview();
+    updateRecordingControls();
+  }
 }
 
 function handleRecordingError(error) {
@@ -622,10 +943,11 @@ function handleRecordingError(error) {
   state.voiceQueue = state.voiceQueue.then(() => {
     state.voiceRecording = false;
     if (state.voiceContext?.jobId === state.activeJob?.id) {
-      openVoiceReview();
+      state.voicePaused = true;
+      persistVoiceDraft();
       renderJob();
     }
-    setMessage(`On-device recording stopped: ${error.message} Any recognized words are kept for review.`, "error");
+    setMessage(`On-device recording interrupted: ${error.message} Your words are kept. Resume dictating or tap Stop to finish.`, "error");
   });
 }
 
@@ -676,23 +998,41 @@ async function handleVoiceUpdate(event = {}) {
   if (liveNode) liveNode.textContent = recordingTranscript(state.voiceTranscript, state.voiceUnconfirmed, state.voiceCurrentText, runId) || "Waiting for speech…";
   persistVoiceDraft();
   if (unexpectedStop) {
-    state.voicePaused = false;
-    openVoiceReview();
+    state.voicePaused = true;
+    persistVoiceDraft();
     renderJob();
-    setMessage("The native recording ended. Recognized words are kept here for review.", "info");
+    setMessage("Recording interrupted. Your dictation is kept. Tap Resume to continue or Stop to finish.", "info");
   }
   updateRecordingControls();
 }
 
 async function startVoiceTranscription() {
-  if (!isWhisperKitAvailable()) {
-    setMessage(NATIVE_VOICE_REQUIRED, "info");
-    const notice = document.querySelector("#nativeVoiceNotice");
-    notice?.scrollIntoView({ behavior: "smooth", block: "center" });
+  const native = isWhisperKitAvailable();
+  const browserAvailable = !isNativePlatform() && state.browserTranscriptionAvailable && browserRecorder.isAvailable();
+  if (!native && !browserAvailable) {
+    const message = isNativePlatform()
+      ? NATIVE_VOICE_REQUIRED
+      : browserRecorder.isAvailable()
+        ? "OpenAI transcription is not configured on this Worker. Use Manual Entry until the API credential is set."
+        : "This browser cannot record audio. Try a current browser or use Manual Entry.";
+    setMessage(message, "info");
+    document.querySelector("#nativeVoiceNotice")?.scrollIntoView({ behavior: "smooth", block: "center" });
     return;
   }
   if (state.voiceBusy || state.voiceRecording || state.voiceStarting || state.busy) return;
   if (!state.activeJob) return;
+  if (state.browserAudioBlob) return setMessage("Retry or discard the saved recording before starting another one.", "info");
+  if (state.voicePaused && !native) {
+    try {
+      browserRecorder.resume();
+      state.voicePaused = false;
+      state.voiceRecording = true;
+      beginRecordingClock();
+      updateRecordingControls();
+      setMessage("Recording resumed. Audio will be sent to OpenAI after Stop.");
+    } catch (error) { setMessage(error.message, "error"); }
+    return;
+  }
   if (!state.voicePaused && state.voiceReviewOpen && !state.voiceReviewProcessed && state.voiceReviewText.trim()) {
     revealJobPanel("#voiceReviewPanel", "#voiceReviewText");
     return setMessage("Process or explicitly discard this transcript before starting another recording.", "info");
@@ -713,18 +1053,32 @@ async function startVoiceTranscription() {
     state.voiceReviewText = "";
     state.voiceReviewOpen = false;
     state.voiceReviewProcessed = false;
+    state.voiceSaveProgress = 0;
+    state.voiceSaveProgressText = "";
+    state.voiceBatch = null;
     state.voiceElapsedMs = 0;
+    state.browserAudioBlob = null;
     state.voiceContext = { jobId: state.activeJob.id, section: currentSectionContext(), material: state.material };
   }
   state.voiceStarting = true;
   state.voiceBusy = true;
   updateRecordingControls();
   try {
-    if (!nativeRecorder.prepared) {
+    if (native && !nativeRecorder.prepared) {
       const status = document.querySelector("#voiceStatus");
       const progress = document.querySelector("#modelProgress");
       if (status) status.textContent = "Downloading or loading the selected large model on this iPhone…";
       if (progress) progress.hidden = false;
+    }
+    if (!native) {
+      const session = await browserRecorder.start();
+      state.voiceRunId = session.streamId;
+      state.voiceRecording = true;
+      state.voiceStarting = false;
+      state.voicePaused = false;
+      beginRecordingClock();
+      setMessage("Recording in this browser. Audio is sent to OpenAI after Stop.");
+      return;
     }
     const session = await nativeRecorder.start();
     state.voiceRunId = session.streamId;
@@ -745,7 +1099,18 @@ async function startVoiceTranscription() {
 }
 
 async function pauseVoiceTranscription() {
-  if (!isWhisperKitAvailable() || !state.voiceRecording) return;
+  if (!state.voiceRecording) return;
+  if (!isWhisperKitAvailable()) {
+    try {
+      browserRecorder.pause();
+      state.voiceRecording = false;
+      state.voicePaused = true;
+      freezeRecordingClock();
+      setMessage("Recording paused. Resume to continue, or stop to transcribe.");
+    } catch (error) { setMessage(error.message, "error"); }
+    updateRecordingControls();
+    return;
+  }
   state.voiceBusy = true;
   updateRecordingControls();
   try {
@@ -768,7 +1133,29 @@ async function pauseVoiceTranscription() {
 }
 
 async function finishVoiceTranscription() {
-  if (!isWhisperKitAvailable() || (!state.voiceRecording && !state.voicePaused)) return;
+  if (state.voiceBusy) return;
+  if (!state.voiceRecording && !state.voicePaused) return;
+  if (!isWhisperKitAvailable()) {
+    state.voiceBusy = true;
+    updateRecordingControls();
+    try {
+      state.browserAudioBlob = await browserRecorder.stop();
+      state.voiceRecording = false;
+      state.voicePaused = false;
+      freezeRecordingClock();
+      state.voiceBusy = false;
+      await transcribeBrowserRecording();
+    } catch (error) {
+      state.voiceRecording = false;
+      state.voicePaused = false;
+      freezeRecordingClock();
+      setMessage(error.message, "error");
+    } finally {
+      state.voiceBusy = false;
+      updateRecordingControls();
+    }
+    return;
+  }
   state.voiceBusy = true;
   updateRecordingControls();
   try {
@@ -779,7 +1166,7 @@ async function finishVoiceTranscription() {
     state.voiceRecording = false;
     state.voicePaused = false;
     state.voiceStarting = false;
-    openVoiceReview();
+    await openVoiceReview();
     renderJob();
     revealJobPanel("#voiceReviewPanel", "#voiceReviewText");
     setMessage("Recording stopped. Review or edit the transcript, then tap Process measurements.");
@@ -792,7 +1179,18 @@ async function finishVoiceTranscription() {
 }
 
 async function stopVoiceTranscription() {
-  if (!isWhisperKitAvailable() || (!state.voiceRecording && !state.voicePaused)) return;
+  if (!isWhisperKitAvailable()) {
+    if (!state.voiceRecording && !state.voicePaused) return;
+    try {
+      state.browserAudioBlob = await browserRecorder.stop();
+      state.voiceRecording = false;
+      state.voicePaused = false;
+      freezeRecordingClock();
+      await transcribeBrowserRecording();
+    } catch (error) { setMessage(error.message, "error"); }
+    return;
+  }
+  if (!state.voiceRecording && !state.voicePaused) return;
   try {
     const result = await nativeRecorder.stop();
     await state.voiceQueue;
@@ -804,41 +1202,174 @@ async function stopVoiceTranscription() {
   state.voiceRecording = false;
   state.voicePaused = false;
   state.voiceStarting = false;
-  openVoiceReview();
+  await openVoiceReview();
+}
+
+async function transcribeBrowserRecording() {
+  if (!state.browserAudioBlob || !state.activeJob) return;
+  const context = state.voiceContext;
+  if (!context || context.jobId !== state.activeJob.id) {
+    return setMessage("This recording belongs to a different job. Reopen its saved job to transcribe it.", "error");
+  }
+  state.voiceBusy = true;
+  updateRecordingControls();
+  const status = document.querySelector("#voiceStatus");
+  if (status) status.textContent = "Sending audio to OpenAI for transcription. The app does not save the audio.";
+  try {
+    const result = await api.transcribeAudio(context.jobId, state.browserAudioBlob);
+    const transcript = String(result.transcript || "").trim();
+    if (!transcript) throw new Error("OpenAI returned an empty transcript.");
+    state.voiceTranscript = transcript;
+    state.voiceUnconfirmed = [];
+    state.voiceCurrentText = "";
+    state.voiceReviewProcessed = false;
+    state.browserAudioBlob = null;
+    await openVoiceReview();
+    renderJob();
+    revealJobPanel("#voiceReviewPanel", "#voiceReviewText");
+    setMessage("Transcription ready. Review or edit the text, then process measurements.");
+  } catch (error) {
+    setMessage(`${error.message} The audio remains in memory; retry or discard it.`, "error");
+  } finally {
+    state.voiceBusy = false;
+    updateRecordingControls();
+  }
+}
+
+function discardBrowserAudio() {
+  state.browserAudioBlob = null;
+  browserRecorder.discard();
+  setMessage("Untranscribed audio discarded.");
+  updateRecordingControls();
 }
 
 async function processVoiceReview() {
   if (state.voiceRecording || state.voicePaused || state.voiceBusy || state.voiceStarting || state.busy || state.voiceReviewProcessed) return;
   const text = document.querySelector("#voiceReviewText")?.value.trim() || "";
   if (!text) return setMessage("There is no recognized text yet. Record again or use Manual Entry.", "info");
-  state.voiceReviewText = text;
   const context = state.voiceContext;
   if (!context || context.jobId !== state.activeJob?.id) {
     return setMessage("This transcript belongs to a different job. Reopen its saved job to process it.", "error");
   }
-  persistVoiceDraft();
-  if (isCorrectionUtterance(text)) {
-    state.pendingVoiceCorrection = { utterance: text, fromVoiceReview: true };
-    renderJob();
-    return setMessage("Choose the final measurement and whether this correction replaces an entry or adds a new one.", "info");
+  if (state.voiceBatch?.items.some(item => item.saved) && state.voiceBatch.sourceText !== text) {
+    return setMessage("Some measurements are already saved. Resolve the remaining draft items below, or discard the draft to start another recording.", "info");
   }
-  const parsed = parseTranscript(text, context.section || currentSectionContext(), context.material || state.material);
-  if (!parsed.section || !shouldSaveVoiceResult(parsed)) return setMessage(parsed.message, "info");
-  parsed.parsed.originalVoiceTranscript = recordingTranscript(
-    state.voiceTranscript, state.voiceUnconfirmed, state.voiceCurrentText, state.voiceRunId
-  );
+  state.voiceReviewText = text;
+  state.pendingVoiceCorrection = null;
+  if (!state.voiceBatch || state.voiceBatch.sourceText !== text) {
+    const attempts = state.voiceBatch?.interpretationAttempts || 0;
+    if (attempts >= 2) return setMessage("Interpretation retry limit reached. Use the editable measurement rows or Manual Entry; no further API request was made.", "info");
+    state.voiceBatch = parseVoiceBatch(text, context.section || currentSectionContext(), context.material || state.material);
+    state.voiceBatch.interpretationAttempts = attempts;
+    await interpretVoiceReview(attempts > 0);
+  } else if (state.voiceBatch.validationBlocked) {
+    await interpretVoiceReview(true);
+  }
+  persistVoiceDraft();
+  renderBatchReview();
+  updateRecordingControls();
+  setMessage("Review every measurement below. Nothing is saved until you tap Confirm & save measurements.");
+}
+
+function renderBatchReview() {
+  const container = document.querySelector("#voiceBatchReview");
+  if (!container) return;
+  container.innerHTML = renderVoiceBatchReview(state.voiceBatch);
+  document.querySelectorAll("[data-batch-edit]").forEach(node => node.addEventListener("change", () => editBatchItem(node.dataset.batchEdit, { text: node.value })));
+  document.querySelectorAll("[data-batch-section]").forEach(node => node.addEventListener("change", () => editBatchItem(node.dataset.batchSection, { section: node.value, replaceSection: true })));
+  document.querySelectorAll("[data-batch-resolve]").forEach(node => node.addEventListener("click", () => resolveBatchIssue(node.dataset.batchResolve)));
+  document.querySelectorAll("[data-batch-ignore]").forEach(node => node.addEventListener("click", () => resolveBatchIssue(node.dataset.batchIgnore, true)));
+}
+
+function editBatchItem(id, changes) {
+  if (state.busy || state.voiceReviewProcessed) return;
+  const item = state.voiceBatch?.items.find(item => item.id === id);
+  if (!item || item.saved) return;
+  const previousText = item.text;
+  // A manually selected section must not be overridden by the old spoken label.
+  if (changes.replaceSection) {
+    changeBatchSection(item, changes.section);
+  } else {
+    item.text = changes.text.trim();
+    recalculateBatchItem(item);
+  }
+  item.corrections.push({ utterance: "Edited during review", previousText, finalText: item.text });
+  persistVoiceDraft();
+  renderBatchReview();
+  updateRecordingControls();
+}
+
+function resolveBatchIssue(id, keepOriginal = false) {
+  if (state.busy) return;
+  const issue = state.voiceBatch?.issues.find(issue => issue.id === id && !issue.resolved);
+  if (!issue) return;
+  if (keepOriginal) {
+    if (!window.confirm("Ignore only this correction and keep its original measurement?")) return;
+    issue.resolved = true;
+    issue.resolution = "Kept original measurement";
+  } else {
+    const targetId = document.querySelector(`#batchTarget-${id}`)?.value;
+    const item = state.voiceBatch.items.find(item => item.id === targetId && !item.saved && (!issue.section || item.section === issue.section));
+    const text = document.querySelector(`#batchFinal-${id}`)?.value.trim();
+    if (!item || !text) return setMessage("Choose a draft measurement and enter its complete final text.", "info");
+    const result = parseTranscript(text, item.section, item.material);
+    if (result.section !== item.section || result.status !== "calculated" || result.requiresReview) {
+      return setMessage("Enter one complete final measurement in the selected item's section.", "info");
+    }
+    const previousText = item.text;
+    item.text = text;
+    recalculateBatchItem(item);
+    item.corrections.push({ utterance: issue.text, previousText, finalText: text });
+    issue.resolved = true;
+    issue.targetId = item.id;
+  }
+  state.voiceReviewProcessed = state.voiceBatch.items.length > 0 &&
+    state.voiceBatch.items.every(item => item.saved) && state.voiceBatch.issues.every(issue => issue.resolved);
+  persistVoiceDraft();
+  renderBatchReview();
+  updateRecordingControls();
+}
+
+async function confirmVoiceBatch() {
+  if (state.voiceRecording || state.voicePaused || state.voiceBusy || state.voiceStarting || state.busy || state.voiceReviewProcessed) return;
+  if (state.voiceContext?.jobId !== state.activeJob?.id) return setMessage("This transcript belongs to a different job.", "error");
+  const batch = state.voiceBatch;
+  if (!batch || batch.sourceText !== state.voiceReviewText) return setMessage("Review measurements before confirming.", "info");
+  const ready = batchReadyItems(batch);
+  if (!ready.length) return setMessage("Resolve or edit the remaining draft measurements before saving them.", "info");
+  const originalVoiceTranscript = recordingTranscript(state.voiceTranscript, state.voiceUnconfirmed, state.voiceCurrentText, state.voiceRunId) || batch.sourceText;
   state.busy = true;
   updateRecordingControls();
   try {
-    await saveMeasurement(parsed, () => {
-      state.voiceReviewProcessed = true;
+    for (const item of ready) {
+      const parsed = item.result;
+      const result = await api.createMeasurement(state.activeJob.id, {
+        ...parsed,
+        rawTranscript: item.originalText,
+        parsed: {
+          ...parsed.parsed, originalVoiceTranscript, reviewedTranscript: batch.sourceText,
+          interpretedTranscript: item.text, correctionHistory: item.corrections,
+          voiceArea: item.area || null,
+          interpretationUsage: batch.usage || null,
+          voiceJobNumber: batch.metadata?.jobNumber || null
+        }
+      });
+      state.entries.push(result.measurement);
+      item.saved = true;
+      item.savedMeasurementId = result.measurement.id;
+      state.voiceSaveProgress = batch.items.filter(item => item.saved).length;
       state.section = parsed.section;
       if (parsed.parsed?.material) state.material = parsed.parsed.material;
       persistVoiceDraft();
-    });
-    setMessage(parsed.message, parsed.requiresReview ? "info" : "success");
+    }
+    state.voiceReviewProcessed = batch.items.every(item => item.saved) && batch.issues.every(issue => issue.resolved);
+    persistVoiceDraft();
+    renderJob();
+    setMessage(`${ready.length} measurement${ready.length === 1 ? "" : "s"} saved.${state.voiceReviewProcessed ? "" : " Remaining draft items and corrections are still here to resolve."}`);
   } catch (error) {
-    setMessage(`${error.message} The transcript is still here; retry when connected.`, "error");
+    persistVoiceDraft();
+    renderJob();
+    setMessage(`${error.message} ${state.voiceSaveProgress} of ${batch.items.length} area entries were saved. The transcript is still here; retry when connected to continue.`, "error");
   } finally {
     state.busy = false;
     updateRecordingControls();
@@ -851,7 +1382,12 @@ function discardVoiceReview() {
   state.voiceReviewText = "";
   state.voiceReviewOpen = false;
   state.voiceReviewProcessed = false;
+  state.voiceSaveProgress = 0;
+  state.voiceSaveProgressText = "";
+  state.voiceBatch = null;
   state.voiceTranscript = "";
+  state.browserAudioBlob = null;
+  browserRecorder.discard();
   state.voiceUnconfirmed = [];
   state.voiceCurrentText = "";
   state.voiceSegments = [];
@@ -934,35 +1470,57 @@ async function applyVoiceCorrection(action) {
 
 function updateRecordingControls() {
   const native = isWhisperKitAvailable();
+  const browserAvailable = !isNativePlatform() && state.browserTranscriptionAvailable && browserRecorder.isAvailable();
   const stateNode = document.querySelector("#recordState");
   if (!stateNode) return;
   const waiting = state.voiceBusy || state.voiceStarting || state.busy;
   const active = state.voiceRecording || state.voicePaused || state.voiceStarting;
-  stateNode.textContent = !native ? "Installed iPhone app required"
-    : state.voiceRecording ? "Listening on this iPhone"
+  stateNode.textContent = state.voiceRecording ? native ? "Listening on this iPhone" : "Recording in browser"
     : state.voicePaused ? "Recording paused"
+    : state.voiceBusy && state.browserAudioBlob ? "Transcribing with OpenAI…"
     : waiting ? "Preparing / finishing recording…"
+    : !native && !browserAvailable ? "Voice recording unavailable"
+    : !native ? "OpenAI transcription ready"
     : state.voiceReviewOpen ? "Recording stopped · review transcript" : "Ready on iPhone";
-  stateNode.dataset.state = state.voiceRecording ? "recording" : state.voicePaused ? "paused" : native ? "ready" : "unavailable";
+  stateNode.dataset.state = state.voiceRecording ? "recording" : state.voicePaused ? "paused" : native || browserAvailable ? "ready" : "unavailable";
   document.querySelector("#recordElapsed").textContent = formatRecordingElapsed(recordingElapsed());
   document.querySelector("#start").hidden = state.voiceRecording || state.voicePaused;
-  document.querySelector("#start").disabled = waiting;
+  document.querySelector("#start").disabled = waiting || (!native && !browserAvailable) || Boolean(state.browserAudioBlob);
   document.querySelector("#stop").hidden = !state.voiceRecording;
   document.querySelector("#stop").disabled = waiting;
   document.querySelector("#pause").hidden = !state.voiceRecording;
   document.querySelector("#pause").disabled = waiting;
   document.querySelector("#resume").hidden = !state.voicePaused;
-  document.querySelector("#resume").disabled = waiting || !native;
+  document.querySelector("#resume").disabled = waiting || (!native && !browserAvailable);
   document.querySelector("#finish").hidden = !state.voicePaused;
-  document.querySelector("#finish").disabled = waiting || !native;
-  document.querySelector("#voiceLiveText").textContent = recordingTranscript(state.voiceTranscript, state.voiceUnconfirmed, state.voiceCurrentText, state.voiceRunId) || "No recording yet.";
+  document.querySelector("#finish").disabled = waiting || (!native && !browserAvailable);
+  document.querySelector("#voiceLiveText").textContent = state.voiceBusy && state.browserAudioBlob
+    ? "Transcribing recording with OpenAI…"
+    : !native && state.voiceRecording ? "Recording audio. The transcript appears after Stop."
+    : recordingTranscript(state.voiceTranscript, state.voiceUnconfirmed, state.voiceCurrentText, state.voiceRunId) || "No recording yet.";
   document.querySelector("#voiceReviewPanel").hidden = !state.voiceReviewOpen;
   const review = document.querySelector("#voiceReviewText");
   if (document.activeElement !== review) review.value = state.voiceReviewText;
-  review.readOnly = active || waiting || state.voiceReviewProcessed;
-  document.querySelector("#processVoiceReview").disabled = active || waiting || state.voiceReviewProcessed || Boolean(state.pendingVoiceCorrection);
-  document.querySelector("#processVoiceReview").textContent = state.voiceReviewProcessed ? "Added to job" : "Process measurements";
+  review.readOnly = active || waiting || state.voiceReviewProcessed || Boolean(state.voiceBatch?.items.some(item => item.saved));
+  document.querySelector("#processVoiceReview").disabled = active || waiting || state.voiceReviewProcessed;
+  document.querySelector("#processVoiceReview").textContent = state.voiceReviewProcessed ? "Added to job"
+    : state.voiceBatch?.validationBlocked ? "Retry interpretation (one retry maximum)"
+    : state.voiceBatch ? "Update measurement preview" : "Review measurements";
+  const confirmBatch = document.querySelector("#confirmVoiceBatch");
+  const readyCount = state.voiceBatch ? batchReadyItems(state.voiceBatch).length : 0;
+  confirmBatch.hidden = !state.voiceBatch || state.voiceReviewProcessed;
+  confirmBatch.disabled = active || waiting || !readyCount || state.voiceBatch?.sourceText !== state.voiceReviewText;
+  confirmBatch.textContent = state.voiceBatch?.validationBlocked ? "Interpretation needs review"
+    : state.voiceBatch && !state.voiceBatch.items.length && !state.voiceBatch.issues.some(issue => !issue.resolved)
+      ? "No measurements to confirm"
+    : state.voiceBatch?.interpreter === "gpt" && !readyCount && !state.voiceReviewProcessed
+      ? "Resolve highlighted items to confirm"
+      : `Confirm & save ${readyCount} measurement${readyCount === 1 ? "" : "s"}`;
   document.querySelector("#discardVoiceReview").disabled = active || waiting;
+  document.querySelector("#retryBrowserTranscription").hidden = !state.browserAudioBlob;
+  document.querySelector("#retryBrowserTranscription").disabled = waiting || !state.browserAudioBlob;
+  document.querySelector("#discardBrowserAudio").hidden = !state.browserAudioBlob;
+  document.querySelector("#discardBrowserAudio").disabled = waiting || !state.browserAudioBlob;
   document.querySelector("#voiceReviewStatus").textContent = state.voiceReviewProcessed
     ? "Measurements saved. You can start a new recording."
     : `Review for ${state.activeJob?.name || "this job"} · ${state.voiceContext?.section || state.section || "choose a section in Settings"}. Nothing is added until you process it.`;
@@ -979,6 +1537,8 @@ function updateRecordingControls() {
 
 window.addEventListener("beforeunload", () => {
   if (state.voiceRecording && isWhisperKitAvailable()) WhisperVoice.stop().catch(() => {});
+  if ((state.voiceRecording || state.voicePaused) && !isWhisperKitAvailable()) browserRecorder.discard();
+  if (state.takeoffPdfUrl) URL.revokeObjectURL(state.takeoffPdfUrl);
 });
 
 if ("serviceWorker" in navigator) {

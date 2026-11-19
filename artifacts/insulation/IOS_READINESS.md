@@ -30,9 +30,10 @@ build cannot be certified until the Xcode checks below pass.
 - Swift SDK APIs were compared directly with Argmax's `v1.1.1` source:
   WhisperKit initialization/download, AudioStreamTranscriber constructor,
   state, start and stop methods. This comparison is not a Swift typecheck.
-- Browser/native/Worker source was searched for audio upload paths, Deepgram,
-  browser capture and remote transcription calls. None remain in the active
-  app. Existing Worker tests confirm the former transcription route is absent.
+- The installed iOS app uses the local WhisperKit plugin and does not upload
+  microphone audio. The browser path is separate: it records in Safari/Chrome
+  and sends completed audio through the authenticated Worker to OpenAI when the
+  `OPENAI_API_KEY` secret is configured. No Deepgram path is used.
 - JavaScript syntax and whitespace checks passed.
 
 ## Issues corrected

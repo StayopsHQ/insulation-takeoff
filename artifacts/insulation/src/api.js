@@ -10,11 +10,12 @@ function resolveUrl(path) {
 }
 
 async function request(path, options = {}) {
+  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
   const response = await fetch(resolveUrl(path), {
     ...options,
     credentials: options.credentials || (apiBaseUrl ? "include" : "same-origin"),
     headers: {
-      ...(options.body && !(options.body instanceof Blob) ? { "Content-Type": "application/json" } : {}),
+      ...(options.body && !(options.body instanceof Blob) && !isFormData ? { "Content-Type": "application/json" } : {}),
       ...(options.headers || {})
     }
   });
@@ -43,5 +44,16 @@ export const api = {
   listMeasurements: jobId => request(`/api/jobs/${encodeURIComponent(jobId)}/measurements`),
   createMeasurement: (jobId, data) => request(`/api/jobs/${encodeURIComponent(jobId)}/measurements`, { method: "POST", body: JSON.stringify(data) }),
   updateMeasurement: (id, data) => request(`/api/measurements/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(data) }),
-  deleteMeasurement: id => request(`/api/measurements/${encodeURIComponent(id)}`, { method: "DELETE" })
+  deleteMeasurement: id => request(`/api/measurements/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  transcriptionStatus: () => request("/api/transcription-status"),
+  interpretTranscript: (jobId, transcript, section) => request("/api/interpret", {
+    method: "POST", body: JSON.stringify({ jobId, transcript, section: section || null })
+  }),
+  transcribeAudio: (jobId, audioBlob) => {
+    const body = new FormData();
+    body.set("jobId", String(jobId));
+    const extension = audioBlob.type.includes("mp4") ? "m4a" : audioBlob.type.includes("ogg") ? "ogg" : "webm";
+    body.set("audio", audioBlob, `takeoff.${extension}`);
+    return request("/api/transcribe", { method: "POST", body });
+  }
 };

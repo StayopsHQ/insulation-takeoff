@@ -6,14 +6,14 @@ This original application source is imported as `@workspace/insulation`. The Rep
 
 - Run the existing unit tests with `pnpm --filter @workspace/insulation test`.
 - The Replit preview builds with the original Cloudflare assets configuration, applies migrations to local D1, and starts Wrangler in local mode.
-- Set `INSULATION_LOCAL_SETUP_TOKEN` as a Replit secret to create the first local administrator. It is passed to Wrangler through a short-lived temporary file outside the project.
+- Set `INSULATION_LOCAL_SETUP_TOKEN` as a Replit secret to create the first local administrator. Set `OPENAI_API_KEY` as a Replit secret for browser transcription. Both are passed to local Wrangler through a short-lived temporary file outside the project.
 - The Replit build uses `vite.config.ts`; `pnpm --filter @workspace/insulation run cloudflare:build` builds Cloudflare assets and passes locally.
 - Verified Cloudflare target: account `61a8b1da30e9f8e400e25e01988a933f`; D1 `insulation-takeoff` (`f2cad654-4e5e-4c73-b37f-c00255abe614`); Worker `insulation-takeoff` with its `DB` binding pointing to that D1. Its verified URL is `https://insulation-takeoff.mleo0705.workers.dev`.
 - The current live Worker responds `Hello world` at `/api/health`, not the JSON health response from this repository's application Worker. Do not build/install a native app against it until the existing Worker source is deployed and `/api/health` returns `{"ok":true,"service":"insulation-takeoff"}`.
 - The existing D1 schema matched migration `0001_initial.sql`. Its Wrangler migration ledger was missing, so the existing baseline was recorded and migration `0002_login_rate_limits.sql` was applied after approval. The ledger now records both migrations. Do not recreate the database or reapply the initial schema manually.
-- Worker secret names were checked without reading values: `SETUP_TOKEN` is configured. On-device transcription uses no speech API key. No Worker deployment has been performed.
+- Worker secret names were checked without reading values: `SETUP_TOKEN` is configured. Browser transcription requires an `OPENAI_API_KEY` Worker secret; native WhisperKit transcription remains on-device. No Worker deployment has been performed.
 
-A responsive application for shared insulation takeoff jobs. The existing Vite interface remains the browser app; Capacitor packages it for iOS, where open-source WhisperKit transcribes locally. Cloudflare Workers and D1 remain the API and persistent shared data backend.
+A responsive insulation takeoff app. The browser uses OpenAI's audio transcription API after Greg stops a recording; the signed iOS app continues to use open-source WhisperKit locally. Cloudflare Workers and D1 remain the API and persistent shared data backend.
 
 ## Included
 
@@ -44,7 +44,9 @@ The following rules are implemented because they were explicitly documented in t
 - Attic: sum dimension-pair areas; baffles sum first dimensions; with sprinklers split 30% sprinkler insulation / 70% blown insulation; without sprinklers 100% blown.
 - Rectangle dimensions multiply; layered coverage = area × layer count.
 
-The following are deliberately **not guessed**: material/R-value mapping by framing size, slopes material-row selection, garage/sill/caulk/foam/miscellaneous quantity rules, prices, and the exact layout of the final takeoff form.
+Caulk tubes = total exterior wall SF / 50 only. Basement exterior walls, band joists, unfinished areas, garage ceilings, attic, slopes, and party walls do not contribute. Foam units = 25% of caulk tubes. Derived consumables are not additional measured area.
+
+The following are deliberately **not guessed**: material/R-value mapping by framing size, slopes material-row selection, garage/sill/miscellaneous quantity rules, prices, and the exact layout of the final takeoff form.
 
 The parser marks provisional or incomplete results for review. It is not a natural-language understanding system and should not be trusted to accept every dictated phrase without review. In particular, spoken measurement grammar, feet/inches notation, multiple wall groups in one utterance, and builder-specific language need validation with Greg.
 
@@ -67,12 +69,12 @@ source fixes, and the remaining Xcode/device validation requirements.
 - During first setup, the status reports the SDK's model-download percentage. Loading/compiling the model and loading the tokenizer remain indeterminate stages; this is not a total setup percentage. The model and tokenizer are stored under Application Support, excluded from iCloud backup. A relative model-folder marker is written only after successful loading, so later launches use the saved folder rather than requesting a remote model listing. If those files are missing/corrupted, internet access may be needed again. Saving measurements to shared jobs still requires a network connection.
 - WhisperKit's `AudioStreamTranscriber` uses microphone capture, voice activity detection, interim segments, and confirmed segments. The app appends confirmed segment identities only once. Unconfirmed tail text remains reviewable and is not auto-saved.
 - Inside a saved job, tap the large Fulcher **LET’S TAKEOFF!** microphone button to prepare the model and start the native recorder. Listening is shown only after a native recording event, with elapsed time and live text. Pause/resume retains the session; **Stop & review** opens an editable transcript. Nothing is added to the job until **Process measurements** is tapped. The recording retains its job, selected section and material, and the original recognized text is retained alongside reviewed measurement data.
-- Manual Entry, Saved Jobs, Results and Settings are separate tiles. Manual Entry is not the primary recording workflow. In a browser (or an iPhone build missing the native plugin), the microphone button explains the installation requirement without starting browser capture or simulating a recording. Draft transcripts are kept per job in session storage, and failed saves leave them available for retry.
+- Manual Entry, Saved Jobs, Results and Settings are separate tiles. In a browser, the Record button captures audio and sends it to OpenAI only after Stop; transcription requires internet and a configured Worker secret. The audio is not stored by this application. OpenAI currently lists `gpt-transcribe` at $0.0045 per audio minute, about $16.20/month at two hours each day for 30 days; confirm current provider pricing before regular use. Draft transcripts are kept per job in session storage, and failed saves leave them available for retry. The installed iOS app continues to use WhisperKit locally and does not send microphone audio to OpenAI.
 - Speech text is parsed by the existing parser and calculations. Correction phrases are held for Greg to choose “Replace selected entry” or “Add as a new entry”; the prior transcript and correction phrase are retained in the measurement's existing JSON data. The D1 schema and calculation engine are unchanged.
 - The open-source SDK does not include the Pro SDK's custom-vocabulary feature. Construction words need real-phone validation; unsupported or ambiguous text must be reviewed rather than guessed.
 - The app requires iOS 16 or later. Keep it foregrounded while dictating. Browser users may still use the Apple keyboard microphone in the manual-entry field.
 - `com.insulationtakeoff.app` is a provisional bundle identifier. Confirm the final unique identifier before any signing or distribution setup.
-- Before a native build, set `VITE_API_BASE_URL` to the verified Cloudflare Worker URL. The native app uses the existing Worker/D1 backend for accounts and saved measurement text; microphone audio is never sent. The Worker allows only its own origin and the app's Capacitor origin for credentialed requests. Test login/session behavior on a real iPhone before distributing.
+- Before a native build, set `VITE_API_BASE_URL` to the verified Cloudflare Worker URL. The native app uses the existing Worker/D1 backend for accounts and saved measurement text; native WhisperKit microphone audio stays on the iPhone. The Worker allows only its own origin and the app's Capacitor origin for credentialed requests. Test login/session behavior on a real iPhone before distributing.
 
 ### Build and install from Windows
 
@@ -152,13 +154,31 @@ Wrangler secrets are configured in the environment used by `wrangler dev`. If ru
    pnpm --filter @workspace/insulation exec wrangler d1 migrations apply insulation-takeoff --remote
    ```
 
-4. Configure only the initial setup token. Speech recognition does not use an API key:
+4. If a production secret needs to be added, first get Greg's explicit approval
+   for that secret change. Never put secret values in `wrangler.toml`, command
+   arguments, source files, GitHub, or chat. To stage browser transcription's
+   OpenAI key without sending the new Worker version live, run this from the
+   repository root after verifying that the selected Wrangler account contains
+   the D1 database whose ID is configured in `wrangler.toml`. Stop if the IDs
+   do not match:
 
    ```bash
-   pnpm --filter @workspace/insulation exec wrangler secret put SETUP_TOKEN
+   pnpm --filter @workspace/insulation exec wrangler versions secret put OPENAI_API_KEY
    ```
 
-5. Build and deploy:
+   Wrangler prompts for the value with masked input. Enter the key only at that
+   prompt; do not pipe it from `echo` or paste it into the command. This creates
+   a Worker version but does not deploy it to traffic. Do not run
+   `wrangler versions deploy` or `wrangler deploy` until Greg separately
+   approves deployment. The regular `wrangler secret put` command and adding a
+   secret through the dashboard deploy immediately, so do not use either for
+   this staged change.
+
+   The existing `SETUP_TOKEN` is already configured. If it ever needs to be
+   replaced, use the same staged `wrangler versions secret put SETUP_TOKEN`
+   workflow, with explicit approval.
+
+5. Build and deploy only after Greg explicitly approves the deployment:
 
    ```bash
    pnpm --filter @workspace/insulation run cloudflare:build
@@ -244,10 +264,15 @@ remaining paths are served from `dist/`.
 1. This project is already pointed at the existing D1 database named `insulation-takeoff`. Do not create a second database or replace its ID.
 2. The existing Worker already has the `DB` D1 binding and `SETUP_TOKEN` secret. Do not paste secrets into GitHub or commit them to this repository.
 3. In the Worker settings, keep the `workers.dev` subdomain enabled.
-4. No voice transcription secret is required. The iOS build uses the open-source WhisperKit model locally.
+4. Set `OPENAI_API_KEY` as a Worker secret to enable browser transcription by
+   following the staged-secret procedure above. Do not add it through the
+   dashboard because that deploys immediately. Set it separately in local
+   Replit Secrets for preview; do not commit it. The iOS build uses WhisperKit
+   locally and does not need this secret.
 5. This voice change does not alter D1 schema. The existing migration ledger was verified and `0002_login_rate_limits.sql` was already applied after approval. Do not recreate the database or rerun migrations.
 
-Do not run any remote migration or deploy command until the user approves that specific action.
+Do not change production secrets, run any remote migration, or deploy until
+Greg approves that specific action.
 
 ### GitHub-connected Cloudflare build settings
 
@@ -267,8 +292,8 @@ in chat. Keep the setup token private.
 
 This is not production-ready until the verified Worker target and native API
 origin are configured, login/job/voice flows are tested on the iPhone, and the
-signed iOS app is installed. Only `SETUP_TOKEN` is needed for initial account
-setup; transcription does not require a secret. The app does not include password reset
+signed iOS app is installed. `SETUP_TOKEN` is needed for initial account setup
+and `OPENAI_API_KEY` is needed only for browser transcription. The app does not include password reset
 or automated account recovery. Keep a secure backup of the database.
 
 
@@ -278,7 +303,7 @@ or automated account recovery. Keep a secure backup of the database.
 - First-admin setup uses one conditional D1 insert instead of a separate count-then-create sequence.
 - Failed login attempts are counted in D1 and throttled by hashed IP and email keys. Migration `0002_login_rate_limits.sql` was already applied to the verified D1 target after approval.
 - Mutating API requests reject a mismatched browser `Origin` header when one is supplied.
-- Removed browser audio recording and the remote speech transcription upload path.
+- The browser Record button now uploads completed audio to OpenAI for transcription through the authenticated Worker; the native WhisperKit path remains on-device.
 - Band-joist parsing no longer removes legitimate measurement values merely because they match the selected R-value.
 
 ### Deploying this update safely

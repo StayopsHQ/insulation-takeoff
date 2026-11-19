@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeNumbers, detectSection, parseTranscript } from "../src/parser.js";
+import { normalizeNumbers, detectSection, parseTranscript, parseTranscriptAreas } from "../src/parser.js";
 
 test("number words normalize and measurements use feet", () => {
   assert.equal(normalizeNumbers("twenty four by eight feet"), "24 x 8 ft");
@@ -11,6 +11,59 @@ test("section recognition accepts exterior basement in either order", () => {
   assert.equal(detectSection("exterior basement"), "basement exterior");
   assert.equal(detectSection("basement exterior walls"), "basement exterior");
   assert.equal(detectSection("exterior walls"), "exterior walls");
+});
+
+test("separate, clearly named sections produce separate entries", () => {
+  const transcript = "Attic 20 by 10, exterior walls 20 bays 2 x 6 9 foot wall 16 on center";
+  const result = parseTranscriptAreas(transcript, "exterior walls", "R-19");
+
+  assert.equal(result.clarificationRequired, false);
+  assert.equal(result.entries.length, 2);
+  assert.equal(result.entries[0].section, "attic");
+  assert.equal(result.entries[0].parsed.area, 200);
+  assert.equal(result.entries[1].section, "exterior walls");
+  assert.equal(result.entries[1].parsed.squareFeet, 220);
+  assert.equal(result.entries[1].parsed.material, "R-19");
+});
+
+test("ambiguous area changes do not inherit the selected section", () => {
+  const transcript = "Exterior walls 20 bays 2 x 6 9 foot wall 16 on center, next area 24 by 8";
+  const result = parseTranscriptAreas(transcript, "exterior walls");
+
+  assert.equal(result.clarificationRequired, true);
+  assert.deepEqual(result.entries, []);
+  assert.match(result.message, /couldn't identify the section/i);
+});
+
+test("measurements before the first named area require clarification", () => {
+  const transcript = "twenty four by eight, then attic 20 by 10 and exterior walls 20 bays 2x6 9 foot 16 on center";
+  const result = parseTranscriptAreas(transcript);
+
+  assert.equal(result.clarificationRequired, true);
+  assert.deepEqual(result.entries, []);
+  assert.match(result.message, /before the first clearly named section/i);
+});
+
+test("a selected first section can own measurements before a clearly named change", () => {
+  const result = parseTranscriptAreas("24 by 8, next area attic 20 by 10", "exterior walls");
+
+  assert.equal(result.clarificationRequired, false);
+  assert.equal(result.entries.length, 2);
+  assert.equal(result.entries[0].section, "exterior walls");
+  assert.equal(result.entries[0].parsed.squareFeet, 192);
+  assert.equal(result.entries[1].section, "attic");
+  assert.equal(result.entries[1].parsed.area, 200);
+});
+
+test("single-area wording still uses the selected section and original calculation", () => {
+  const transcript = "24 by 8 and 32 by 8";
+  const result = parseTranscriptAreas(transcript, "basement exterior", "R-19");
+
+  assert.equal(result.clarificationRequired, false);
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0].section, "basement exterior");
+  assert.equal(result.entries[0].parsed.squareFeet, 448);
+  assert.equal(result.entries[0].parsed.material, "R-19");
 });
 
 test("spoken material is captured as R-value", () => {

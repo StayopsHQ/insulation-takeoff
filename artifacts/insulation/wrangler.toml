@@ -15,6 +15,7 @@ database_name = "insulation-takeoff"
 database_id = "f2cad654-4e5e-4c73-b37f-c00255abe614"
 migrations_dir = "worker/migrations"
 
+# Keep credentials out of vars; provision OPENAI_API_KEY as a Worker secret.
 [vars]
 APP_NAME = "Insulation Takeoff"
 SESSION_DAYS = "14"

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const setupToken = process.env.INSULATION_LOCAL_SETUP_TOKEN;
+const openAiKey = process.env.OPENAI_API_KEY;
 const port = process.env.PORT || "19324";
 let temporaryDirectory;
 let envFile;
@@ -18,18 +19,21 @@ const args = [
   port,
 ];
 
-if (setupToken) {
-  if (/[\r\n]/.test(setupToken)) {
-    throw new Error("INSULATION_LOCAL_SETUP_TOKEN must be a single-line value.");
-  }
-
+const localVars = [];
+if (setupToken) localVars.push(["SETUP_TOKEN", setupToken]);
+if (openAiKey) localVars.push(["OPENAI_API_KEY", openAiKey]);
+for (const [name, value] of localVars) {
+  if (/[\r\n]/.test(value)) throw new Error(`${name} must be a single-line value.`);
+}
+if (localVars.length) {
   temporaryDirectory = await mkdtemp(join(tmpdir(), "insulation-wrangler-"));
   envFile = join(temporaryDirectory, ".dev.vars");
-  await writeFile(envFile, `SETUP_TOKEN=${JSON.stringify(setupToken)}\n`, {
+  await writeFile(envFile, localVars.map(([name, value]) => `${name}=${JSON.stringify(value)}`).join("\n") + "\n", {
     mode: 0o600,
   });
 
   process.env.INSULATION_LOCAL_SETUP_TOKEN = "";
+  process.env.OPENAI_API_KEY = "";
   args.push("--env-file", envFile);
 }
 
